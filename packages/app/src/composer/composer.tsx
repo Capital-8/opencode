@@ -19,6 +19,7 @@ import { DialogSelectModelUnpaid } from "@/providers/models/unpaid"
 import { formatKeybind, useCommand } from "@/shell/commands/command"
 import { useLanguage } from "@/runtime/i18n/language"
 import type { ComposerModel } from "./model"
+import type { ComposerModelLabel } from "./model-label"
 
 export function Composer(props: {
   class?: string
@@ -46,6 +47,17 @@ export function Composer(props: {
     return language.t("dialog.model.select.title")
   }
 
+  const modelLabel = (): ComposerModelLabel => {
+    const preview = props.model.model.preview
+    const label = preview ? preview.label : props.model.model.label
+
+    if (label) return label
+    const provider = preview ? preview.provider : props.model.model.providerName
+    const model = modelName()
+
+    return { provider, model, full: provider ? `${provider} / ${model}` : model }
+  }
+
   return (
     <div class="flex flex-col gap-3">
       <ComposerEditor
@@ -67,8 +79,7 @@ export function Composer(props: {
             title={language.t("command.model.choose")}
             keybind={command.keybindParts("model.choose")}
             model={props.model.model.selection}
-            providerName={props.model.model.preview?.provider ?? props.model.model.providerName}
-            modelName={modelName()}
+            label={modelLabel()}
             onClose={props.model.restoreFocus}
             onUnpaidClick={() => dialog.show(() => <DialogSelectModelUnpaid model={props.model.model.selection} />)}
           />
@@ -85,8 +96,7 @@ function ComposerModelControl(props: {
   title: string
   keybind: string[]
   model: ComposerModel["model"]["selection"]
-  providerName?: string
-  modelName: string
+  label: ComposerModelLabel
   onClose: () => void
   onUnpaidClick: () => void
 }) {
@@ -128,16 +138,16 @@ function ComposerModelControl(props: {
   const content = () => (
     <>
       <span class="flex min-w-0 whitespace-nowrap leading-4">
-        <Show when={props.providerName}>
+        <Show when={props.label.provider}>
           {(name) => (
             <>
-              <span class="shrink-0 text-v2-text-text-faint">{name()}</span>
+              <bdi class="min-w-0 shrink-[2] truncate text-v2-text-text-faint">{name()}</bdi>
               <Slash />
               <span class="sr-only">{" / "}</span>
             </>
           )}
         </Show>
-        <span class="truncate">{props.modelName}</span>
+        <bdi class="min-w-0 truncate">{props.label.model}</bdi>
       </span>
       <span class="-ml-0.5 -mr-1 flex shrink-0">
         <Icon name="chevron-down" />
@@ -182,6 +192,7 @@ function ComposerModelControl(props: {
             <Button
               data-action="composer-model"
               data-control-type="dialog"
+              aria-label={props.label.full}
               variant="ghost-muted"
               size="normal"
               class="min-w-0 max-w-[60cqw] justify-start ![font-weight:440]"
@@ -212,6 +223,7 @@ function ComposerModelControl(props: {
                 classList={{ "animate-in fade-in": shouldAnimate() }}
                 data-action="composer-model"
                 data-control-type="drawer"
+                aria-label={props.label.full}
               >
                 {content()}
               </Button>

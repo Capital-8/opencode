@@ -12,6 +12,7 @@ import { useComposerState } from "./persistence"
 import { useConfiguredModel } from "@/providers/models/configured"
 import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/console"
 import { useGlobal } from "@/runtime/server/runtime"
+import { composerModelLabels } from "./model-label"
 
 export function createComposerControls(input: { model?: ModelSelection } = {}) {
   const local = useLocal()
@@ -20,7 +21,59 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
   const providers = useProviders(() => sdk().directory)
   const models = useGlobal().models
 
-  const providerName = (providerID: string, catalog = providers.all()) => composerProviderName(providerID, catalog)
+  const providerName = (providerID: string, catalog = providers.all()) => {
+    const provider = catalog.get(providerID)
+
+    if (providerID === "opencode" && (!provider?.integrationID || provider.integrationID === "opencode")) return
+
+    return composerProviderName(providerID, catalog)
+  }
+
+  const labels = (
+    catalog: ReturnType<typeof providers.all>,
+    location: Parameters<typeof data.location.integration.list>[0],
+    connected?: readonly string[],
+  ) => {
+    const integrations = data.location.integration.list(location)
+
+    // ModelSelection removes the catalog's latest marker; collision checks must use those same visible names.
+    return composerModelLabels(
+      new Map(
+        [...catalog].map(([id, provider]) => [
+          id,
+          {
+            ...provider,
+            models: Object.fromEntries(
+              Object.values(provider.models).map((model) => [
+                model.id,
+                { id: model.id, name: model.name.replace("(latest)", "").trim() },
+              ]),
+            ),
+          },
+        ]),
+      ),
+      {
+        connected,
+        accounts: new Map(
+          [...catalog.values()].flatMap((provider) => {
+            const connection = integrations
+              ?.find((integration) => integration.id === (provider.integrationID ?? provider.id))
+              ?.connections.find((connection) => connection.type === "credential")
+
+            return connection ? [[provider.id, connection.label] as const] : []
+          }),
+        ),
+      },
+    )
+  }
+
+  const modelLabels = createMemo(() =>
+    labels(
+      providers.all(),
+      { directory: sdk().directory },
+      providers.connected().map((provider) => provider.id),
+    ),
+  )
 
   const loading = () => {
     const selection = input.model ?? local.model
@@ -39,16 +92,31 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
     if (!expected) return
 
     const catalogs = providers.ready()
-      ? [providers.all()]
+      ? [
+          {
+            all: providers.all(),
+            connected: providers.connected().map((provider) => provider.id),
+            location: { directory: sdk().directory },
+          },
+        ]
       : [undefined, ...data.session.list().map((item) => item.location)].map((location) => {
           const provider = data.location.provider.list(location)
           const catalog = data.location.model.list(location)
 
-          return provider && catalog ? normalizeProviderList(provider, catalog).all : undefined
+          if (!provider || !catalog) return
+          const normalized = normalizeProviderList(provider, catalog)
+
+          return { all: normalized.all, connected: normalized.connected, location }
         })
 
     const match = catalogs
-      .map((all) => all && { all, model: all.get(expected.model.providerID)?.models[expected.model.modelID] })
+      .map(
+        (catalog) =>
+          catalog && {
+            ...catalog,
+            model: catalog.all.get(expected.model.providerID)?.models[expected.model.modelID],
+          },
+      )
       .find((item) => !!item?.model)
 
     if (!match?.model) return
@@ -57,6 +125,9 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
     return {
       provider: providerName(expected.model.providerID, match.all),
       model: match.model.name.replace("(latest)", "").trim(),
+      label: labels(match.all, match.location, match.connected).get(
+        `${expected.model.providerID}/${expected.model.modelID}`,
+      ),
       variants,
       variant:
         resolveModelVariant({
@@ -82,8 +153,9 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
       },
       model: {
         selection,
-        // A model the catalog no longer offers still names its provider.
+        // A model the catalog no longer offers keeps its provider, except for native Console models.
         providerName: key && providerName(key.providerID),
+        label: key && modelLabels().get(`${key.providerID}/${key.modelID}`),
         paid: providers.paid().length > 0,
         // The session's model applies only to its agent, so resolve agents before showing a model.
         loading: loading(),
