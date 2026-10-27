@@ -10,9 +10,10 @@ import { useModels } from "@/providers/models/models"
 import { cycleModelVariant, getConfiguredAgentVariant, resolveModelVariant } from "@/providers/models/variant"
 import { useComposerState } from "./persistence"
 import { useConfiguredModel } from "@/providers/models/configured"
-import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/console"
 import { useGlobal } from "@/runtime/server/runtime"
-import { composerModelLabelKey, composerModelLabels } from "./model-label"
+import { composerModelLabelKey, composerModelLabels, composerProviderName } from "./model-label"
+
+export { composerProviderName }
 
 export function createComposerControls(input: { model?: ModelSelection } = {}) {
   const local = useLocal()
@@ -26,16 +27,10 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
 
     if (providerID === "opencode" && (!provider?.integrationID || provider.integrationID === "opencode")) return
 
-    return composerProviderName(providerID, catalog)
+    return composerProviderName(providerID, catalog, { origin: "OpenCode" })
   }
 
-  const labels = (
-    catalog: ReturnType<typeof providers.all>,
-    location: Parameters<typeof data.location.integration.list>[0],
-    connected: readonly string[],
-  ) => {
-    const integrations = data.location.integration.list(location)
-
+  const labels = (catalog: ReturnType<typeof providers.all>, connected: readonly string[]) => {
     // Use the same visible names as ModelSelection for collision checks.
     return composerModelLabels(
       new Map(
@@ -52,25 +47,13 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
           },
         ]),
       ),
-      {
-        connected,
-        accounts: new Map(
-          [...catalog.values()].flatMap((provider) => {
-            const connection = integrations
-              ?.find((integration) => integration.id === (provider.integrationID ?? provider.id))
-              ?.connections.find((connection) => connection.type === "credential")
-
-            return connection ? [[provider.id, connection.label] as const] : []
-          }),
-        ),
-      },
+      { connected },
     )
   }
 
   const modelLabels = createMemo(() =>
     labels(
       providers.all(),
-      { directory: sdk().directory },
       providers.connected().map((provider) => provider.id),
     ),
   )
@@ -96,7 +79,6 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
           {
             all: providers.all(),
             connected: providers.connected().map((provider) => provider.id),
-            location: { directory: sdk().directory },
           },
         ]
       : [undefined, ...data.session.list().map((item) => item.location)].map((location) => {
@@ -106,7 +88,7 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
           if (!provider || !catalog) return
           const normalized = normalizeProviderList(provider, catalog)
 
-          return { all: normalized.all, connected: normalized.connected, location }
+          return { all: normalized.all, connected: normalized.connected }
         })
 
     const match = catalogs
@@ -125,7 +107,7 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
     return {
       provider: providerName(expected.model.providerID, match.all),
       model: match.model.name.replace("(latest)", "").trim(),
-      label: labels(match.all, match.location, match.connected).get(
+      label: labels(match.all, match.connected).get(
         composerModelLabelKey(expected.model.providerID, expected.model.modelID),
       ),
       variants,
@@ -163,24 +145,6 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
     }
   })
 }
-
-// Like the model picker, a Console-managed provider drops its "Workspace / " prefix unless the
-// same provider is also connected directly and the workspace is what tells them apart.
-export function composerProviderName(providerID: string, catalog: ReturnType<typeof normalizeProviderList>["all"]) {
-  const provider = catalog.get(providerID)
-
-  if (!provider) return providerID
-  const all = [...catalog.values()]
-  const managed = consoleProviderGroup(all)
-
-  if (!managed?.providers.includes(provider)) return provider.name
-  const direct = all.some((item) => !managed.providers.includes(item) && canonical(item) === canonical(provider))
-
-  return direct ? provider.name : consoleProviderName(managed, provider.name)
-}
-
-const canonical = (provider: { id: string; canonical?: string }) =>
-  provider.canonical ?? provider.id.replace(/^console-/, "")
 
 export function createComposerModelSelection(input: {
   agent: () => { name: string; model?: ModelKey; variant?: string } | undefined

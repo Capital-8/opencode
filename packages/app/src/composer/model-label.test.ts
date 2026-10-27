@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { composerModelLabelKey, composerModelLabels } from "./model-label"
+import { composerModelLabelKey, composerModelLabels, composerProviderName } from "./model-label"
 
 function provider(
   id: string,
@@ -15,323 +15,172 @@ function provider(
   }
 }
 
+function catalog(...providers: ReturnType<typeof provider>[]) {
+  return new Map(providers.map((provider) => [provider.id, provider]))
+}
+
 const root = provider("opencode", "Anomaly / OpenCode", { integrationID: "opencode", models: [] })
 
 const managed = provider("console-openai", "Anomaly / OpenAI", { integrationID: "opencode", canonical: "openai" })
 
-const cases: {
-  name: string
-  providers: ReturnType<typeof provider>[]
-  options?: Parameters<typeof composerModelLabels>[1]
-  expected: [string, string, string | undefined, string, string][]
-}[] = [
+test.each([
+  provider("opencode", "Anomaly / OpenCode", { integrationID: "opencode" }),
+  provider("opencode", "OpenCode"),
+])("omits native provider $name in composer but retains its accessible context", (native) => {
+  const all = catalog(native)
+  expect(composerProviderName("opencode", all)).toBe("OpenCode")
+  expect(composerModelLabels(all).get(composerModelLabelKey("opencode", "m"))).toEqual({
+    provider: undefined,
+    model: "Model",
+    full: `${native.name} / Model`,
+  })
+})
+
+test.each([
+  { direct: provider("openai", "Renamed", { models: [] }), connected: [], expected: "OpenAI" },
+  { direct: provider("openai", "Renamed", { models: [] }), connected: ["openai"], expected: "Anomaly / OpenAI" },
   {
-    name: "preserves configured direct provider and model names verbatim",
-    providers: [provider("custom/route", "  Custom / Proxy  ", { models: [["model/id", "  GPT / custom  "]] })],
-    expected: [
-      ["custom/route", "model/id", "  Custom / Proxy  ", "  GPT / custom  ", "  Custom / Proxy   /   GPT / custom  "],
-    ],
+    direct: provider("account", "Owls", { integrationID: "openai" }),
+    connected: ["account"],
+    expected: "Anomaly / OpenAI",
   },
+  { direct: provider("proxy", "OpenAI", { canonical: "openai" }), connected: ["proxy"], expected: "OpenAI" },
+  { direct: provider("azure", "Azure", { canonical: "openai" }), connected: ["azure"], expected: "OpenAI" },
+])("matches connected stable identities, not names or canonical proxies: $direct.id / $connected", (row) => {
+  const all = catalog(root, managed, row.direct)
+  expect(composerProviderName(managed.id, all, { connected: row.connected })).toBe(row.expected)
+})
+
+test("shared helper retains workspace origin by default and supports composer origin", () => {
+  const all = catalog(root, managed, provider("openai", "OpenAI", { models: [] }))
+  expect(composerProviderName(managed.id, all)).toBe("Anomaly / OpenAI")
+  expect(composerProviderName(managed.id, all, { origin: "OpenCode" })).toBe("OpenCode / OpenAI")
+  expect(composerProviderName("openai", all)).toBe("OpenAI")
+})
+
+test.each([
+  { connected: ["opencode", "console-openai"], provider: "OpenAI", full: "Anomaly / OpenAI / Model" },
   {
-    name: "shows managed Console native models without a provider",
-    providers: [provider("opencode", "Anomaly / OpenCode", { integrationID: "opencode" })],
-    expected: [["opencode", "m", undefined, "Model", "Anomaly / OpenCode / Model"]],
+    connected: ["opencode", "console-openai", "openai"],
+    provider: "OpenCode / OpenAI",
+    full: "OpenCode / OpenAI / Model (Anomaly / OpenAI / Model)",
   },
-  {
-    name: "supports legacy free Console native models",
-    providers: [provider("opencode", "OpenCode")],
-    expected: [["opencode", "m", undefined, "Model", "OpenCode / Model"]],
-  },
-  {
-    name: "shortens a managed provider with no matching direct connection",
-    providers: [root, managed],
-    expected: [["console-openai", "m", "OpenAI", "Model", "Anomaly / OpenAI / Model"]],
-  },
-  {
-    name: "distinguishes all three routes using OpenCode rather than workspace origin",
-    providers: [
-      provider("opencode", "Anomaly / OpenCode", { integrationID: "opencode" }),
-      managed,
-      provider("openai", "OpenAI"),
-    ],
-    expected: [
-      ["opencode", "m", undefined, "Model", "Anomaly / OpenCode / Model"],
-      ["console-openai", "m", "OpenCode / OpenAI", "Model", "OpenCode / OpenAI / Model (Anomaly / OpenAI / Model)"],
-      ["openai", "m", "OpenAI", "Model", "OpenAI / Model"],
-    ],
-  },
-  {
-    name: "does not treat a custom canonical proxy as a direct OpenAI connection",
-    providers: [root, managed, provider("company-proxy", "Company", { canonical: "openai" })],
-    expected: [
-      ["console-openai", "m", "OpenAI", "Model", "Anomaly / OpenAI / Model"],
-      ["company-proxy", "m", "Company", "Model", "Company / Model"],
-    ],
-  },
-  {
-    name: "keeps Azure, Vertex and OpenRouter routes separate from their upstream canonical providers",
-    providers: [
-      root,
-      managed,
-      provider("remote-google", "Anomaly / Google", { integrationID: "opencode", canonical: "google" }),
-      provider("azure", "Azure", { canonical: "openai" }),
-      provider("google-vertex", "Vertex", { canonical: "google" }),
-      provider("openrouter", "OpenRouter", { canonical: "openai" }),
-    ],
-    expected: [
-      ["console-openai", "m", "OpenAI", "Model", "Anomaly / OpenAI / Model"],
-      ["remote-google", "m", "Google", "Model", "Anomaly / Google / Model"],
-      ["azure", "m", "Azure", "Model", "Azure / Model"],
-      ["google-vertex", "m", "Vertex", "Model", "Vertex / Model"],
-      ["openrouter", "m", "OpenRouter", "Model", "OpenRouter / Model"],
-    ],
-  },
-  {
-    name: "matches stable integration IDs despite misleading configured names",
-    providers: [
-      root,
-      provider("remote", "Anomaly / Not OpenAI", { integrationID: "opencode", canonical: "openai" }),
-      provider("account-1", "Owls", { integrationID: "openai" }),
-    ],
-    expected: [
-      ["remote", "m", "OpenCode / Not OpenAI", "Model", "OpenCode / Not OpenAI / Model (Anomaly / Not OpenAI / Model)"],
-      ["account-1", "m", "Owls", "Model", "Owls / Model"],
-    ],
-  },
-  {
-    name: "does not infer unknown managed routes by stripping console IDs or matching display names",
-    providers: [
-      root,
-      provider("console-openai", "Anomaly / Other", { integrationID: "opencode" }),
-      provider("openai", "OpenAI"),
-    ],
-    expected: [
-      ["console-openai", "m", "Other", "Model", "Anomaly / Other / Model"],
-      ["openai", "m", "OpenAI", "Model", "OpenAI / Model"],
-    ],
-  },
-  {
-    name: "falls back to Console origin when unknown managed and direct presentation collides",
-    providers: [
-      root,
-      provider("remote", "Anomaly / OpenAI", { integrationID: "opencode" }),
-      provider("proxy", "OpenAI"),
-    ],
-    expected: [
-      ["remote", "m", "OpenCode / OpenAI", "Model", "OpenCode / OpenAI / Model (Anomaly / OpenAI / Model)"],
-      ["proxy", "m", "OpenAI", "Model", "OpenAI / Model"],
-    ],
-  },
-  {
-    name: "retains accessible route identity when original managed and direct names also collide",
-    providers: [provider("remote", "OpenAI", { integrationID: "opencode" }), provider("openai", "OpenAI")],
-    expected: [
-      ["remote", "m", "OpenCode / OpenAI", "Model", "OpenCode / OpenAI / Model (OpenAI / Model (remote))"],
-      ["openai", "m", "OpenAI", "Model", "OpenAI / Model (openai)"],
-    ],
-  },
-  {
-    name: "does not infer matching routes from equal provider names when complete labels differ",
-    providers: [
-      root,
-      provider("remote", "Anomaly / OpenAI", { integrationID: "opencode", models: [["managed", "Managed"]] }),
-      provider("proxy", "OpenAI"),
-    ],
-    expected: [
-      ["remote", "managed", "OpenAI", "Managed", "Anomaly / OpenAI / Managed"],
-      ["proxy", "m", "OpenAI", "Model", "OpenAI / Model"],
-    ],
-  },
-  {
-    name: "adds native origin when a model name resembles a complete provider and model label",
-    providers: [
-      provider("opencode", "OpenCode", { models: [["native", "OpenAI / Model"]] }),
-      provider("openai", "OpenAI"),
-    ],
-    expected: [
-      ["opencode", "native", "OpenCode", "OpenAI / Model", "OpenCode / OpenAI / Model"],
-      ["openai", "m", "OpenAI", "Model", "OpenAI / Model"],
-    ],
-  },
-  {
-    name: "leaves duplicate provider names unqualified when complete model labels differ",
-    providers: [provider("a", "Proxy"), provider("b", "Proxy", { models: [["other", "Other"]] })],
-    expected: [
-      ["a", "m", "Proxy", "Model", "Proxy / Model"],
-      ["b", "other", "Proxy", "Other", "Proxy / Other"],
-    ],
-  },
-  {
-    name: "qualifies only overlapping model labels and ignores duplicate zero-model connections",
-    providers: [
-      provider("a", "Proxy", {
+])("composer origin follows direct connection availability: $provider", (row) => {
+  const all = catalog(root, managed, provider("openai", "OpenAI", { models: [] }))
+  expect(composerModelLabels(all, { connected: row.connected }).get(composerModelLabelKey(managed.id, "m"))).toEqual({
+    provider: row.provider,
+    model: "Model",
+    full: row.full,
+  })
+})
+
+test("unknown managed routes do not infer identity from console prefixes or display names", () => {
+  const all = catalog(
+    root,
+    provider("console-openai", "Anomaly / OpenAI", { integrationID: "opencode" }),
+    provider("openai", "OpenAI"),
+  )
+
+  expect(composerProviderName("console-openai", all)).toBe("OpenAI")
+  expect(composerModelLabels(all).get(composerModelLabelKey("console-openai", "m"))).toEqual({
+    provider: "console-openai",
+    model: "Model",
+    full: "console-openai / Model (Anomaly / OpenAI / Model)",
+  })
+})
+
+test("duplicate provider labels use raw IDs only for overlapping model labels", () => {
+  const labels = composerModelLabels(
+    catalog(
+      provider("a", "OpenAI", {
         models: [
           ["m", "Model"],
           ["other", "Other"],
         ],
       }),
-      provider("b", "Proxy"),
-      provider("empty", "Proxy", { models: [] }),
-    ],
-    options: {
-      connected: ["a", "b", "empty"],
-      accounts: new Map([
-        ["a", "Work"],
-        ["b", "Personal"],
-      ]),
-    },
-    expected: [
-      ["a", "m", "Proxy (Work)", "Model", "Proxy (Work) / Model"],
-      ["a", "other", "Proxy", "Other", "Proxy / Other"],
-      ["b", "m", "Proxy (Personal)", "Model", "Proxy (Personal) / Model"],
-    ],
-  },
-  {
-    name: "does not qualify a model because another connected provider with the same name has no models",
-    providers: [provider("a", "Proxy"), provider("empty", "Proxy", { models: [] })],
-    options: { connected: ["a", "empty"] },
-    expected: [["a", "m", "Proxy", "Model", "Proxy / Model"]],
-  },
-  {
-    name: "qualifies duplicate managed routes without inventing account names",
-    providers: [
-      root,
-      managed,
-      provider("remote", "Anomaly / OpenAI", { integrationID: "opencode", canonical: "openai" }),
-    ],
-    expected: [
-      ["console-openai", "m", "OpenAI (console-openai)", "Model", "Anomaly / OpenAI (console-openai) / Model"],
-      ["remote", "m", "OpenAI (remote)", "Model", "Anomaly / OpenAI (remote) / Model"],
-    ],
-  },
-  {
-    name: "uses supplied aliases for duplicate connection names",
-    providers: [
-      provider("a", "OpenAI", { integrationID: "openai" }),
-      provider("b", "OpenAI", { integrationID: "openai" }),
-    ],
-    options: {
-      accounts: new Map([
-        ["a", "Work"],
-        ["b", "Personal"],
-      ]),
-    },
-    expected: [
-      ["a", "m", "OpenAI (Work)", "Model", "OpenAI (Work) / Model"],
-      ["b", "m", "OpenAI (Personal)", "Model", "OpenAI (Personal) / Model"],
-    ],
-  },
-  {
-    name: "adds stable provider IDs when supplied aliases also collide",
-    providers: [provider("a", "OpenAI"), provider("b", "OpenAI")],
-    options: {
-      accounts: new Map([
-        ["a", "Work"],
-        ["b", "Work"],
-      ]),
-    },
-    expected: [
-      ["a", "m", "OpenAI (Work, a)", "Model", "OpenAI (Work, a) / Model"],
-      ["b", "m", "OpenAI (Work, b)", "Model", "OpenAI (Work, b) / Model"],
-    ],
-  },
-  {
-    name: "qualifies duplicate model names on a single route with exact model IDs",
-    providers: [
+      provider("b", "OpenAI"),
+      provider("empty", "OpenAI", { models: [] }),
+    ),
+  )
+
+  expect(labels.get(composerModelLabelKey("a", "m"))).toEqual({
+    provider: "a",
+    model: "Model",
+    full: "a / Model (OpenAI / Model)",
+  })
+  expect(labels.get(composerModelLabelKey("b", "m"))).toEqual({
+    provider: "b",
+    model: "Model",
+    full: "b / Model (OpenAI / Model)",
+  })
+  expect(labels.get(composerModelLabelKey("a", "other"))).toEqual({
+    provider: "OpenAI",
+    model: "Other",
+    full: "OpenAI / Other",
+  })
+})
+
+test("same-route duplicate model names append exact model IDs", () => {
+  const labels = composerModelLabels(
+    catalog(
       provider("openai", "OpenAI", {
         models: [
           ["v1", "GPT"],
           ["v2", "GPT"],
         ],
       }),
-    ],
-    expected: [
-      ["openai", "v1", "OpenAI", "GPT (v1)", "OpenAI / GPT (v1)"],
-      ["openai", "v2", "OpenAI", "GPT (v2)", "OpenAI / GPT (v2)"],
-    ],
-  },
-  {
-    name: "distinguishes a custom model alias from an automatically qualified model name",
-    providers: [
-      provider("custom", "Proxy", {
+    ),
+  )
+
+  expect(labels.get(composerModelLabelKey("openai", "v1"))).toEqual({
+    provider: "OpenAI",
+    model: "GPT (v1)",
+    full: "OpenAI / GPT (v1)",
+  })
+  expect(labels.get(composerModelLabelKey("openai", "v2"))).toEqual({
+    provider: "OpenAI",
+    model: "GPT (v2)",
+    full: "OpenAI / GPT (v2)",
+  })
+})
+
+test("a peer group with provider and model duplicates needs both qualifiers", () => {
+  const labels = composerModelLabels(
+    catalog(
+      provider("a", "OpenAI", {
         models: [
           ["v1", "GPT"],
           ["v2", "GPT"],
-          ["alias", "GPT (v1)"],
         ],
       }),
-    ],
-    expected: [
-      ["custom", "v1", "Proxy", "GPT (v1)", "Proxy / GPT (v1)"],
-      ["custom", "v2", "Proxy", "GPT (v2)", "Proxy / GPT (v2)"],
-      ["custom", "alias", "Proxy", "GPT (v1) (alias)", "Proxy / GPT (v1) (alias)"],
-    ],
-  },
-  {
-    name: "counts connected direct routes with no models",
-    providers: [root, managed, provider("openai", "Renamed", { models: [] })],
-    options: { connected: ["opencode", "console-openai", "openai"] },
-    expected: [
-      ["console-openai", "m", "OpenCode / OpenAI", "Model", "OpenCode / OpenAI / Model (Anomaly / OpenAI / Model)"],
-    ],
-  },
-  {
-    name: "ignores disconnected direct catalog entries for connection matching",
-    providers: [root, managed, provider("openai", "OpenAI", { models: [] })],
-    options: { connected: ["opencode", "console-openai"] },
-    expected: [["console-openai", "m", "OpenAI", "Model", "Anomaly / OpenAI / Model"]],
-  },
-  {
-    name: "resolves global text collisions across provider and model boundaries",
-    providers: [
-      root,
-      provider("remote", "Anomaly / A", { integrationID: "opencode", models: [["b", "B / Model"]] }),
-      provider("direct", "A / B"),
-    ],
-    expected: [
-      ["remote", "b", "OpenCode / A", "B / Model", "OpenCode / A / B / Model (Anomaly / A / B / Model)"],
-      ["direct", "m", "A / B", "Model", "A / B / Model"],
-    ],
-  },
-]
-
-test.each(cases)("composer model labels: $name", (row) => {
-  const expected = new Map(
-    row.expected.map(([providerID, modelID, provider, model, full]) => [
-      composerModelLabelKey(providerID, modelID),
-      { provider, model, full },
-    ]),
+      provider("b", "OpenAI", { models: [["m", "GPT"]] }),
+    ),
   )
 
-  const catalog = new Map(row.providers.map((provider) => [provider.id, provider]))
-  expect(composerModelLabels(catalog, row.options)).toEqual(expected)
-
-  // Labels must not depend on catalog order.
-  const reversed = new Map(
-    [...row.providers]
-      .reverse()
-      .map((provider) => [
-        provider.id,
-        { ...provider, models: Object.fromEntries(Object.entries(provider.models).reverse()) },
-      ]),
-  )
-
-  expect(
-    composerModelLabels(reversed, {
-      connected: row.options?.connected && [...row.options.connected].reverse(),
-      accounts: row.options?.accounts && new Map([...row.options.accounts].reverse()),
-    }),
-  ).toEqual(expected)
+  expect(labels.get(composerModelLabelKey("a", "v1"))).toMatchObject({ provider: "a", model: "GPT (v1)" })
+  expect(labels.get(composerModelLabelKey("a", "v2"))).toMatchObject({ provider: "a", model: "GPT (v2)" })
+  expect(labels.get(composerModelLabelKey("b", "m"))).toMatchObject({ provider: "b", model: "GPT" })
 })
 
-test("keeps slash-containing provider and model identities separate", () => {
-  const providers = [
-    provider("company", "Company", { models: [["openai/gpt", "First model"]] }),
-    provider("company/openai", "Other", { models: [["gpt", "Second model"]] }),
-  ]
+test("preserves configured direct provider and model names verbatim", () => {
+  const all = catalog(provider("custom", "  Custom / Proxy  ", { models: [["m", "  GPT / custom  "]] }))
+  expect(composerProviderName("custom", all)).toBe("  Custom / Proxy  ")
+  expect(composerModelLabels(all).get(composerModelLabelKey("custom", "m"))).toEqual({
+    provider: "  Custom / Proxy  ",
+    model: "  GPT / custom  ",
+    full: "  Custom / Proxy   /   GPT / custom  ",
+  })
+})
 
-  const labels = composerModelLabels(new Map(providers.map((provider) => [provider.id, provider])))
+test("tuple keys keep slash-containing provider and model identities separate", () => {
+  const labels = composerModelLabels(
+    catalog(
+      provider("company", "Company", { models: [["openai/gpt", "First model"]] }),
+      provider("company/openai", "Other", { models: [["gpt", "Second model"]] }),
+    ),
+  )
 
+  expect(composerModelLabelKey("company", "openai/gpt")).toBe('["company","openai/gpt"]')
   expect(labels.size).toBe(2)
   expect(labels.get(composerModelLabelKey("company", "openai/gpt"))).toEqual({
     provider: "Company",

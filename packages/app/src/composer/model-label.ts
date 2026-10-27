@@ -2,10 +2,6 @@ import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/c
 
 export type ComposerModelLabel = { provider?: string; model: string; full: string }
 
-export function composerModelLabelKey(providerID: string, modelID: string) {
-  return JSON.stringify([providerID, modelID])
-}
-
 type Provider = {
   id: string
   name: string
@@ -14,162 +10,83 @@ type Provider = {
   models: Readonly<Record<string, { id: string; name: string }>>
 }
 
-export function composerModelLabels(
+export function composerModelLabelKey(providerID: string, modelID: string) {
+  return JSON.stringify([providerID, modelID])
+}
+
+export function composerProviderName(
+  providerID: string,
   catalog: ReadonlyMap<string, Provider>,
-  options?: { connected?: readonly string[]; accounts?: ReadonlyMap<string, string> },
-): ReadonlyMap<string, ComposerModelLabel> {
+  options?: { connected?: readonly string[]; origin?: string },
+) {
+  const provider = catalog.get(providerID)
+
+  if (!provider) return providerID
   const all = [...catalog.values()]
-  const connected = options?.connected && new Set(options.connected)
-  const active = (id: string) => !connected || connected.has(id)
   const group = consoleProviderGroup(all)
 
-  const native = (provider: Provider) =>
-    provider.id === "opencode" && (!provider.integrationID || provider.integrationID === "opencode")
+  const name =
+    provider.integrationID === "opencode" && group ? consoleProviderName(group, provider.name) : provider.name
 
-  const managed = (provider: Provider) => provider.integrationID === "opencode" && !native(provider)
+  if (provider.integrationID !== "opencode" || !provider.canonical) return name
+  const connected = options?.connected && new Set(options.connected)
 
-  // A custom proxy's canonical provider describes catalog inheritance, not its connection route.
-  const direct = new Set(
-    all.flatMap((provider) =>
-      active(provider.id) && !native(provider) && !managed(provider) ? [provider.integrationID ?? provider.id] : [],
-    ),
+  const direct = all.some(
+    (item) =>
+      !native(item) &&
+      item.integrationID !== "opencode" &&
+      (!connected || connected.has(item.id)) &&
+      (item.integrationID ?? item.id) === provider.canonical,
   )
 
-  const rows = all.flatMap((provider) => {
-    const name = managed(provider) && group ? consoleProviderName(group, provider.name) : provider.name
-    const origin = managed(provider) && !!provider.canonical && direct.has(provider.canonical)
-    const models = Object.values(provider.models)
-    const duplicateModels = counts(models.map((model) => model.name))
+  return direct ? `${options?.origin ?? group?.workspace ?? "OpenCode"} / ${name}` : name
+}
 
-    return models.map((model) => {
-      const modelName = (duplicateModels.get(model.name) ?? 0) > 1 ? `${model.name} (${model.id})` : model.name
+export function composerModelLabels(
+  catalog: ReadonlyMap<string, Provider>,
+  options?: { connected?: readonly string[] },
+): ReadonlyMap<string, ComposerModelLabel> {
+  const connected = options?.connected && new Set(options.connected)
+  const active = (id: string) => !connected || connected.has(id)
 
-      return {
-        id: composerModelLabelKey(provider.id, model.id),
-        providerID: provider.id,
-        modelID: model.id,
-        originalProvider: provider.name,
-        originalModel: model.name,
-        managed: managed(provider),
-        native: native(provider),
-        origin,
-        label: {
-          provider: native(provider) ? undefined : origin ? `OpenCode / ${name}` : name,
-          model: modelName,
-          full: `${provider.name} / ${modelName}`,
-        },
-      }
-    })
+  const rows = [...catalog.values()].flatMap((provider) => {
+    const name = native(provider)
+      ? undefined
+      : composerProviderName(provider.id, catalog, { ...options, origin: "OpenCode" })
+
+    return Object.values(provider.models).map((model) => ({
+      key: composerModelLabelKey(provider.id, model.id),
+      providerID: provider.id,
+      modelID: model.id,
+      originalProvider: provider.name,
+      provider: name,
+      model: model.name,
+      text: name ? `${name} / ${model.name}` : model.name,
+    }))
   })
 
-  const collisions = counts(rows.flatMap((row) => (active(row.providerID) ? [text(row.label)] : [])))
-
-  const directLabels = new Set(
-    rows.flatMap((row) => (active(row.providerID) && !row.managed && !row.native ? [text(row.label)] : [])),
+  const groups = Map.groupBy(
+    rows.filter((row) => active(row.providerID)),
+    (row) => row.text,
   )
-
-  const resolved = rows.map((row) => {
-    if (!active(row.providerID) || (collisions.get(text(row.label)) ?? 0) < 2) return row
-
-    if (row.native) return { ...row, label: { ...row.label, provider: "OpenCode" } }
-
-    if (row.managed && !row.origin && directLabels.has(text(row.label)))
-      return { ...row, label: { ...row.label, provider: `OpenCode / ${row.label.provider}` } }
-
-    return row
-  })
-
-  const duplicates = counts(resolved.flatMap((row) => (active(row.providerID) ? [text(row.label)] : [])))
-
-  const aliases = counts(
-    resolved.flatMap((row) =>
-      active(row.providerID) && (duplicates.get(text(row.label)) ?? 0) > 1
-        ? [JSON.stringify([text(row.label), options?.accounts?.get(row.providerID)])]
-        : [],
-    ),
-  )
-
-  const qualified = resolved.map((row) => {
-    if (!active(row.providerID) || (duplicates.get(text(row.label)) ?? 0) < 2) return row
-
-    if (
-      !resolved.some(
-        (other) =>
-          active(other.providerID) && other.providerID !== row.providerID && text(other.label) === text(row.label),
-      )
-    ) {
-      const model = `${row.originalModel} (${row.modelID})`
-
-      return { ...row, label: { ...row.label, model, full: `${row.originalProvider} / ${model}` } }
-    }
-
-    const alias = options?.accounts?.get(row.providerID)
-
-    const qualifier =
-      alias && aliases.get(JSON.stringify([text(row.label), alias])) === 1
-        ? alias
-        : alias
-          ? `${alias}, ${row.providerID}`
-          : row.providerID
-
-    return {
-      ...row,
-      label: {
-        ...row.label,
-        provider: `${row.label.provider ?? "OpenCode"} (${qualifier})`,
-        full: `${row.originalProvider} (${qualifier}) / ${row.label.model}`,
-      },
-    }
-  })
-
-  const remaining = counts(qualified.flatMap((row) => (active(row.providerID) ? [text(row.label)] : [])))
-  const full = counts(qualified.flatMap((row) => (active(row.providerID) ? [row.label.full] : [])))
 
   return new Map(
-    qualified.map((row) => {
-      if (!active(row.providerID)) return [row.id, row.label]
-      const collision = (remaining.get(text(row.label)) ?? 0) > 1
+    rows.map((row) => {
+      const peers = active(row.providerID) ? groups.get(row.text) : undefined
+      const provider = peers?.some((other) => other.providerID !== row.providerID) ? row.providerID : row.provider
 
-      const sameProvider =
-        collision &&
-        qualified.some(
-          (other) =>
-            other.id !== row.id && other.providerID === row.providerID && text(other.label) === text(row.label),
-        )
+      const model = peers?.some((other) => other.providerID === row.providerID && other.modelID !== row.modelID)
+        ? `${row.model} (${row.modelID})`
+        : row.model
 
-      const label = collision
-        ? {
-            ...row.label,
-            provider: sameProvider ? row.label.provider : `${row.label.provider ?? "OpenCode"} (${row.providerID})`,
-            model: sameProvider ? `${row.label.model} (${row.modelID})` : row.label.model,
-          }
-        : row.label
+      const visible = provider ? `${provider} / ${model}` : model
+      const full = `${row.originalProvider} / ${model}`
 
-      const context =
-        collision || (full.get(row.label.full) ?? 0) > 1
-          ? `${row.label.full} (${sameProvider ? row.modelID : row.providerID})`
-          : row.label.full
-
-      const visible = text(label)
-
-      return [
-        row.id,
-        {
-          ...label,
-          full: context.includes(visible) ? context : `${visible} (${context})`,
-        },
-      ]
+      return [row.key, { provider, model, full: full.includes(visible) ? full : `${visible} (${full})` }]
     }),
   )
 }
 
-function text(label: ComposerModelLabel) {
-  return label.provider ? `${label.provider} / ${label.model}` : label.model
-}
-
-function counts(values: readonly string[]) {
-  const result = new Map<string, number>()
-  values.forEach((value) => result.set(value, (result.get(value) ?? 0) + 1))
-
-  return result
+function native(provider: Provider) {
+  return provider.id === "opencode" && (!provider.integrationID || provider.integrationID === "opencode")
 }
