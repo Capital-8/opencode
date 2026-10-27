@@ -307,7 +307,7 @@ export type ScheduleActionPrompt = { type: "prompt"; prompt: string }
 
 export type ScheduleStatus = "active" | "paused" | "done"
 
-export type ScheduleOutcome = "fired" | "late" | "skipped" | "disabled" | "expired"
+export type ScheduleOutcome = "fired" | "late" | "skipped" | "disabled" | "failed"
 
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
