@@ -47,7 +47,7 @@ export function Composer(props: {
     return language.t("dialog.model.select.title")
   }
 
-  const modelLabel = (): ComposerModelLabel => {
+  const modelLabel = () => {
     const preview = props.model.model.preview
     const label = preview ? preview.label : props.model.model.label
 

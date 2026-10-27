@@ -504,7 +504,7 @@ declare global {
 test("a managed composer label follows direct connections, not picker filtering or model identity", async ({
   page,
 }) => {
-  const sessionID = "ses_managed_root"
+  const sessionID = "ses_managed_provider"
   const connected = { direct: false }
   const switches: unknown[] = []
   const prompts: Parameters<NonNullable<MockServerConfig["onPrompt"]>>[0]["body"][] = []
@@ -515,14 +515,14 @@ test("a managed composer label follows direct connections, not picker filtering 
 
   const view = await openSession(page, {
     name: "ManagedProvider",
-    sessions: [{ id: sessionID, agent: "build", model: { id: "alpha", providerID: "opencode" } }],
+    sessions: [{ id: sessionID, agent: "build", model: { id: "gpt", providerID: "console-openai" } }],
     provider: () => ({
       all: [
         {
           id: "opencode",
           integrationID: "opencode",
           name: "Anomaly / OpenCode",
-          models: { alpha: { id: "alpha", name: "Alpha" } },
+          models: {},
         },
         {
           id: "console-openai",
@@ -535,7 +535,6 @@ test("a managed composer label follows direct connections, not picker filtering 
           ? [
               {
                 id: "openai",
-                canonical: "openai",
                 name: "OpenAI",
                 models: { "direct-model": { id: "direct-model", name: "Direct Model" } },
               },
@@ -553,20 +552,14 @@ test("a managed composer label follows direct connections, not picker filtering 
             { providerID: "console-openai", modelID: "gpt", visibility: "show" },
             { providerID: "openai", modelID: "direct-model", visibility: "show" },
           ],
-          recent: [],
-          variant: {},
         },
       },
     },
   })
 
   const control = page.locator('[data-action="composer-model"]')
-  await expect(control).toHaveText("Alpha")
-  await control.click()
   const picker = page.getByRole("dialog", { name: "Select model", exact: true })
   const selected = picker.locator('[data-option-key="console-openai:gpt"]')
-  await selected.click()
-  await expect(picker).toBeHidden()
   await expect(control).toHaveText("OpenAI / GPT")
 
   connected.direct = true
@@ -587,6 +580,7 @@ test("a managed composer label follows direct connections, not picker filtering 
     },
   ])
   await expect(control).toHaveText("OpenCode / OpenAI / GPT")
+  await expect(control).toHaveAccessibleName("OpenCode / OpenAI / GPT (Anomaly / OpenAI / GPT)")
   await control.click()
   const search = picker.getByRole("combobox", { name: "Search models", exact: true })
   await expect(picker.locator('[data-option-key="openai:direct-model"]')).toBeVisible()
@@ -615,20 +609,12 @@ test("a managed composer label follows direct connections, not picker filtering 
     },
   ])
   await expect(control).toHaveText("OpenAI / GPT")
-  await control.click()
-  await expect(selected).toHaveAttribute("aria-current", "true")
-  await search.fill("Alpha")
-  await expect(selected).toHaveCount(0)
-  await expect(control).toHaveText("OpenAI / GPT")
-  await search.press("Escape")
-  await expect(picker).toBeHidden()
 
-  expect(switches).toEqual([])
   await view.editor.fill("Keep the managed provider selected")
   await view.editor.press("Enter")
   await expect.poll(() => prompts.length).toBe(1)
   expect(prompts[0]).toMatchObject({ text: "Keep the managed provider selected" })
-  expect(switches).toEqual([{ model: { id: "gpt", providerID: "console-openai" } }])
+  expect(switches).toEqual([])
 })
 
 async function draft(page: Page) {

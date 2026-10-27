@@ -12,7 +12,7 @@ import { useComposerState } from "./persistence"
 import { useConfiguredModel } from "@/providers/models/configured"
 import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/console"
 import { useGlobal } from "@/runtime/server/runtime"
-import { composerModelLabels } from "./model-label"
+import { composerModelLabelKey, composerModelLabels } from "./model-label"
 
 export function createComposerControls(input: { model?: ModelSelection } = {}) {
   const local = useLocal()
@@ -32,11 +32,11 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
   const labels = (
     catalog: ReturnType<typeof providers.all>,
     location: Parameters<typeof data.location.integration.list>[0],
-    connected?: readonly string[],
+    connected: readonly string[],
   ) => {
     const integrations = data.location.integration.list(location)
 
-    // ModelSelection removes the catalog's latest marker; collision checks must use those same visible names.
+    // Use the same visible names as ModelSelection for collision checks.
     return composerModelLabels(
       new Map(
         [...catalog].map(([id, provider]) => [
@@ -126,7 +126,7 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
       provider: providerName(expected.model.providerID, match.all),
       model: match.model.name.replace("(latest)", "").trim(),
       label: labels(match.all, match.location, match.connected).get(
-        `${expected.model.providerID}/${expected.model.modelID}`,
+        composerModelLabelKey(expected.model.providerID, expected.model.modelID),
       ),
       variants,
       variant:
@@ -153,9 +153,8 @@ export function createComposerControls(input: { model?: ModelSelection } = {}) {
       },
       model: {
         selection,
-        // A model the catalog no longer offers keeps its provider, except for native Console models.
         providerName: key && providerName(key.providerID),
-        label: key && modelLabels().get(`${key.providerID}/${key.modelID}`),
+        label: key && modelLabels().get(composerModelLabelKey(key.providerID, key.modelID)),
         paid: providers.paid().length > 0,
         // The session's model applies only to its agent, so resolve agents before showing a model.
         loading: loading(),

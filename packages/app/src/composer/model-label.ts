@@ -2,6 +2,10 @@ import { consoleProviderGroup, consoleProviderName } from "@/providers/catalog/c
 
 export type ComposerModelLabel = { provider?: string; model: string; full: string }
 
+export function composerModelLabelKey(providerID: string, modelID: string) {
+  return JSON.stringify([providerID, modelID])
+}
+
 type Provider = {
   id: string
   name: string
@@ -31,32 +35,31 @@ export function composerModelLabels(
     ),
   )
 
-  const providers = all.map((provider) => {
+  const rows = all.flatMap((provider) => {
     const name = managed(provider) && group ? consoleProviderName(group, provider.name) : provider.name
     const origin = managed(provider) && !!provider.canonical && direct.has(provider.canonical)
-
-    return { value: provider, name: native(provider) ? undefined : origin ? `OpenCode / ${name}` : name, origin }
-  })
-
-  const rows = providers.flatMap((provider) => {
-    const models = Object.values(provider.value.models)
+    const models = Object.values(provider.models)
     const duplicateModels = counts(models.map((model) => model.name))
 
-    return models.map((model) => ({
-      id: `${provider.value.id}/${model.id}`,
-      providerID: provider.value.id,
-      originalProvider: provider.value.name,
-      managed: managed(provider.value),
-      native: native(provider.value),
-      origin: provider.origin,
-      label: {
-        provider: provider.name,
-        model: (duplicateModels.get(model.name) ?? 0) > 1 ? `${model.name} (${model.id})` : model.name,
-        full: `${provider.value.name} / ${model.name}${
-          (duplicateModels.get(model.name) ?? 0) > 1 ? ` (${model.id})` : ""
-        }`,
-      },
-    }))
+    return models.map((model) => {
+      const modelName = (duplicateModels.get(model.name) ?? 0) > 1 ? `${model.name} (${model.id})` : model.name
+
+      return {
+        id: composerModelLabelKey(provider.id, model.id),
+        providerID: provider.id,
+        modelID: model.id,
+        originalProvider: provider.name,
+        originalModel: model.name,
+        managed: managed(provider),
+        native: native(provider),
+        origin,
+        label: {
+          provider: native(provider) ? undefined : origin ? `OpenCode / ${name}` : name,
+          model: modelName,
+          full: `${provider.name} / ${modelName}`,
+        },
+      }
+    })
   })
 
   const collisions = counts(rows.flatMap((row) => (active(row.providerID) ? [text(row.label)] : [])))
@@ -88,6 +91,18 @@ export function composerModelLabels(
 
   const qualified = resolved.map((row) => {
     if (!active(row.providerID) || (duplicates.get(text(row.label)) ?? 0) < 2) return row
+
+    if (
+      !resolved.some(
+        (other) =>
+          active(other.providerID) && other.providerID !== row.providerID && text(other.label) === text(row.label),
+      )
+    ) {
+      const model = `${row.originalModel} (${row.modelID})`
+
+      return { ...row, label: { ...row.label, model, full: `${row.originalProvider} / ${model}` } }
+    }
+
     const alias = options?.accounts?.get(row.providerID)
 
     const qualifier =
@@ -115,19 +130,33 @@ export function composerModelLabels(
       if (!active(row.providerID)) return [row.id, row.label]
       const collision = (remaining.get(text(row.label)) ?? 0) > 1
 
-      const label = {
-        ...row.label,
-        full:
-          collision || (full.get(row.label.full) ?? 0) > 1 ? `${row.label.full} (${row.providerID})` : row.label.full,
-      }
+      const sameProvider =
+        collision &&
+        qualified.some(
+          (other) =>
+            other.id !== row.id && other.providerID === row.providerID && text(other.label) === text(row.label),
+        )
 
-      if (!collision) return [row.id, label]
+      const label = collision
+        ? {
+            ...row.label,
+            provider: sameProvider ? row.label.provider : `${row.label.provider ?? "OpenCode"} (${row.providerID})`,
+            model: sameProvider ? `${row.label.model} (${row.modelID})` : row.label.model,
+          }
+        : row.label
+
+      const context =
+        collision || (full.get(row.label.full) ?? 0) > 1
+          ? `${row.label.full} (${sameProvider ? row.modelID : row.providerID})`
+          : row.label.full
+
+      const visible = text(label)
 
       return [
         row.id,
         {
           ...label,
-          provider: `${row.label.provider ?? "OpenCode"} (${row.providerID})`,
+          full: context.includes(visible) ? context : `${visible} (${context})`,
         },
       ]
     }),
@@ -138,8 +167,8 @@ function text(label: ComposerModelLabel) {
   return label.provider ? `${label.provider} / ${label.model}` : label.model
 }
 
-function counts<T>(values: readonly T[]) {
-  const result = new Map<T, number>()
+function counts(values: readonly string[]) {
+  const result = new Map<string, number>()
   values.forEach((value) => result.set(value, (result.get(value) ?? 0) + 1))
 
   return result
