@@ -20186,6 +20186,15 @@
               "in": {
                 "$ref": "#/components/schemas/Schedule.Duration"
               },
+              "at": {
+                "not": {}
+              },
+              "every": {
+                "not": {}
+              },
+              "cron": {
+                "not": {}
+              },
               "tz": {
                 "type": "string"
               }
@@ -20198,6 +20207,15 @@
             "properties": {
               "at": {
                 "type": "string"
+              },
+              "in": {
+                "not": {}
+              },
+              "every": {
+                "not": {}
+              },
+              "cron": {
+                "not": {}
               },
               "tz": {
                 "type": "string"
@@ -20212,6 +20230,15 @@
               "every": {
                 "$ref": "#/components/schemas/Schedule.Duration"
               },
+              "in": {
+                "not": {}
+              },
+              "at": {
+                "not": {}
+              },
+              "cron": {
+                "not": {}
+              },
               "tz": {
                 "type": "string"
               }
@@ -20224,6 +20251,15 @@
             "properties": {
               "cron": {
                 "type": "string"
+              },
+              "in": {
+                "not": {}
+              },
+              "at": {
+                "not": {}
+              },
+              "every": {
+                "not": {}
               },
               "tz": {
                 "type": "string"

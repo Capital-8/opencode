@@ -104,12 +104,15 @@ export const CreateInput = Schema.Struct({
 }).annotate({ identifier: "Schedule.CreateInput" })
 export type CreateInput = typeof CreateInput.Type
 
+/** Declares a trigger absent, so `{ in, every }` fails instead of decoding as a one-shot. */
+const absent = Schema.optionalKey(Schema.Never)
+
 /** The `when` callers write: exactly one of `in`, `at`, `every` or `cron`, with an optional `tz`. */
 export const WhenInput = Schema.Union([
-  Schema.Struct({ in: In.fields.in, ...zone }),
-  Schema.Struct({ at: At.fields.at, ...zone }),
-  Schema.Struct({ every: Every.fields.every, ...zone }),
-  Schema.Struct({ cron: Cron.fields.cron, ...zone }),
+  Schema.Struct({ in: In.fields.in, at: absent, every: absent, cron: absent, ...zone }),
+  Schema.Struct({ at: At.fields.at, in: absent, every: absent, cron: absent, ...zone }),
+  Schema.Struct({ every: Every.fields.every, in: absent, at: absent, cron: absent, ...zone }),
+  Schema.Struct({ cron: Cron.fields.cron, in: absent, at: absent, every: absent, ...zone }),
 ]).annotate({ identifier: "Schedule.WhenInput" })
 export type WhenInput = typeof WhenInput.Type
 
@@ -138,8 +141,8 @@ export const toCreateInput = (sessionID: SessionID, request: Request): CreateInp
 })
 
 const toWhen = (when: WhenInput): When => {
-  if ("in" in when) return { type: "in", ...when }
-  if ("at" in when) return { type: "at", ...when }
-  if ("every" in when) return { type: "every", ...when }
-  return { type: "cron", ...when }
+  if (when.in !== undefined) return { type: "in", in: when.in, tz: when.tz }
+  if (when.at !== undefined) return { type: "at", at: when.at, tz: when.tz }
+  if (when.every !== undefined) return { type: "every", every: when.every, tz: when.tz }
+  return { type: "cron", cron: when.cron, tz: when.tz }
 }

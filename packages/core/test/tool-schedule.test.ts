@@ -27,6 +27,7 @@ const it = testEffect(AppNodeBuilder.build(Tool.node, [Image.node.replace(imageP
 /** An in-memory Schedule service. The real one is covered in schedule.test.ts; this exercises the tool layer. */
 const memory = () => {
   const rows = new Map<Schedule.ID, Schedule.Info>()
+  const flag = { enabled: true }
   const find = (id: Schedule.ID): Effect.Effect<Schedule.Info, Schedule.NotFoundError> => {
     const info = rows.get(id)
     return info ? Effect.succeed(info) : Effect.fail(new Schedule.NotFoundError({ scheduleID: id }))
@@ -62,11 +63,11 @@ const memory = () => {
     pause: (id) => update(id, "paused"),
     resume: (id) => update(id, "active"),
     remove: (id) => find(id).pipe(Effect.map(() => void rows.delete(id))),
-    enabled: () => Effect.succeed(true),
+    enabled: () => Effect.sync(() => flag.enabled),
     tick: Effect.void,
     run: Effect.never,
   })
-  return { rows, service }
+  return { rows, flag, service }
 }
 
 const setup = (experimental: ConfigExperimental.Info | undefined) =>
@@ -91,7 +92,7 @@ const setup = (experimental: ConfigExperimental.Info | undefined) =>
       Effect.provide(Layer.succeed(Schedule.Service, schedules.service)),
       Effect.provide(permissionLayer({ assert: () => Effect.void })),
     )
-    return { registry: yield* Tool.Service, rows: schedules.rows, commands, prompts }
+    return { registry: yield* Tool.Service, rows: schedules.rows, flag: schedules.flag, commands, prompts }
   })
 
 /** Runs one Code Mode call, the way the model reaches these tools. */
@@ -109,6 +110,20 @@ const call = (registry: Tool.Interface, name: string, input: unknown, session = 
 const run = (registry: Tool.Interface, name: string, input: unknown, session = sessionID) =>
   call(registry, name, input, session).pipe(
     Effect.map((result) => JSON.parse(result.content?.[0]?.type === "text" ? result.content[0].text : "")),
+  )
+
+/** Calls a tool directly, as a model does when Code Mode is denied, and returns the text it reads. */
+const direct = (registry: Tool.Interface, name: string, input: unknown) =>
+  registry.snapshot([{ action: "execute", resource: "*", effect: "deny" }]).pipe(
+    Effect.flatMap((tools) =>
+      tools.execute({
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call", id: `call-direct-${name}`, name: `opencode_${name}`, input },
+      }),
+    ),
+    Effect.map((result) => result.content?.map((part) => (part.type === "text" ? part.text : "")).join("")),
+    Effect.orDie,
   )
 
 const paths = (registry: Tool.Interface) =>
@@ -178,6 +193,56 @@ describe("ScheduleTools", () => {
       const text = (prompts[0] as { text: string }).text
       expect(text).toContain("every morning at 9 check CI")
       expect(text).not.toContain("$ARGUMENTS")
+    }),
+  )
+
+  it.effect("rechecks the flag on each call, since a request keeps its tools after config reloads", () =>
+    Effect.gen(function* () {
+      const { registry, rows, flag } = yield* setup(new ConfigExperimental.Info({ schedules: true }))
+      yield* run(registry, "schedule_create", { when: { every: "1 hour" }, prompt: "ping" })
+      flag.enabled = false
+
+      for (const [name, input] of [
+        ["schedule_list", {}],
+        ["schedule_pause", { id: "sch_1" }],
+        ["schedule_resume", { id: "sch_1" }],
+        ["schedule_delete", { id: "sch_1" }],
+      ] as const) {
+        expect(yield* call(registry, name, input)).toMatchObject({
+          content: [{ type: "text", text: expect.stringContaining("Scheduled tasks are disabled") }],
+          metadata: { error: true },
+        })
+      }
+      expect(rows.get(Schedule.ID.make("sch_1"))).toMatchObject({ status: "active" })
+    }),
+  )
+
+  it.effect("rejects a when with more than one trigger instead of keeping the first", () =>
+    Effect.gen(function* () {
+      const { registry, rows } = yield* setup(new ConfigExperimental.Info({ schedules: true }))
+      expect(
+        yield* call(registry, "schedule_create", { when: { in: "5 minutes", every: "1 hour" }, prompt: "ping" }),
+      ).toMatchObject({ metadata: { error: true } })
+      expect(rows.size).toBe(0)
+    }),
+  )
+
+  it.effect("puts each schedule's id, trigger, status, next run and prompt in the text without Code Mode", () =>
+    Effect.gen(function* () {
+      const { registry } = yield* setup(new ConfigExperimental.Info({ schedules: true }))
+      expect(
+        yield* direct(registry, "schedule_create", { name: "ci", when: { every: "1 hour" }, prompt: "check CI" }),
+      ).toBe(
+        'Scheduled: sch_1 "ci": every 1 hour (America/New_York), active, next 2026-10-27T09:20:00.000-04:00, prompt: "check CI"',
+      )
+      yield* direct(registry, "schedule_create", { when: { cron: "0 9 * * 1-5" }, prompt: "x".repeat(100) })
+      yield* direct(registry, "schedule_pause", { id: "sch_2" })
+      const list = yield* direct(registry, "schedule_list", {})
+      expect(list?.split("\n").slice(1)).toEqual([
+        'sch_1 "ci": every 1 hour (America/New_York), active, next 2026-10-27T09:20:00.000-04:00, prompt: "check CI"',
+        `sch_2: cron "0 9 * * 1-5" (America/New_York), paused, next 2026-10-27T09:20:00.000-04:00, prompt: "${"x".repeat(79)}…"`,
+      ])
+      expect(list).toStartWith("Now: ")
     }),
   )
 

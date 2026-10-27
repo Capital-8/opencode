@@ -30,7 +30,11 @@ export const toCreateInput = ScheduleSchema.toCreateInput
 
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Schedule.NotFoundError", {
   scheduleID: ID,
-}) {}
+}) {
+  override get message() {
+    return `Schedule not found: ${this.scheduleID}`
+  }
+}
 
 export class InvalidError extends Schema.TaggedError<InvalidError>()("Schedule.InvalidError", {
   reason: Schema.String,

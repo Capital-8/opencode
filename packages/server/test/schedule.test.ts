@@ -25,15 +25,22 @@ it.live("manages schedules through the experimental API where the session's conf
       await Promise.all([global, enabled, disabled].map((item) => fs.mkdir(item, { recursive: true })))
       await fs.writeFile(path.join(enabled, "opencode.json"), JSON.stringify({ experimental: { schedules: true } }))
     })
-    const api = client(
-      yield* ServerFetch.make({
-        app: { version: "test" },
-        database: { path: path.join(dir, "opencode.db") },
-        config: { directory: global, project: true, claude: false },
-        models: { fetch: false },
-        fs: { filewatcher: false },
-      }),
-    )
+    const handler = yield* ServerFetch.make({
+      app: { version: "test" },
+      database: { path: path.join(dir, "opencode.db") },
+      config: { directory: global, project: true, claude: false },
+      models: { fetch: false },
+      fs: { filewatcher: false },
+    })
+    const api = client(handler)
+    const handlerRequest = (route: string, body: unknown) =>
+      handler(
+        new Request(`http://opencode.local${route}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      )
 
     yield* Effect.promise(async () => {
       const session = await api.session.create({ location: { directory: enabled } })
@@ -64,6 +71,14 @@ it.live("manages schedules through the experimental API where the session's conf
       await expect(
         api.experimental.schedule.create({ sessionID: session.id, when: { every: "soon" }, prompt: "ping" }),
       ).rejects.toMatchObject({ _tag: "InvalidRequestError" })
+      // Two triggers would otherwise decode as the first one, silently turning a repeat into a one-shot.
+      const twoTriggers = await handlerRequest("/api/experimental/schedule", {
+        sessionID: session.id,
+        when: { in: "5 minutes", every: "1 hour" },
+        prompt: "ping",
+      })
+      expect(twoTriggers.status).toBe(400)
+      expect(await api.experimental.schedule.list({ sessionID: session.id })).toEqual([])
       await expect(
         api.experimental.schedule.create({ sessionID: session.id, when: { in: "0 seconds" }, prompt: "ping" }),
       ).rejects.toMatchObject({ _tag: "InvalidRequestError", message: "Duration must be positive: 0 seconds" })

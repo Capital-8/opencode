@@ -4251,10 +4251,10 @@ export type ExperimentalScheduleCreateInput = {
   readonly sessionID: string
   readonly name?: string | undefined
   readonly when:
-    | { readonly in: string; readonly tz?: string }
-    | { readonly at: string; readonly tz?: string }
-    | { readonly every: string; readonly tz?: string }
-    | { readonly cron: string; readonly tz?: string }
+    | { readonly in: string; readonly at?: never; readonly every?: never; readonly cron?: never; readonly tz?: string }
+    | { readonly at: string; readonly in?: never; readonly every?: never; readonly cron?: never; readonly tz?: string }
+    | { readonly every: string; readonly in?: never; readonly at?: never; readonly cron?: never; readonly tz?: string }
+    | { readonly cron: string; readonly in?: never; readonly at?: never; readonly every?: never; readonly tz?: string }
   readonly ends?: { readonly after?: string; readonly at?: string; readonly times?: number } | undefined
   readonly prompt: string
 }

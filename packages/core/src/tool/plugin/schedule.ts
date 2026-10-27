@@ -51,16 +51,21 @@ export const Plugin = {
     )
     const enabled = () => Config.latest(loaded.entries, "experimental")?.schedules === true
 
+    // A request keeps the tools it started with after config reloads, so each call rechecks the flag.
+    const allowed = (sessionID: Session.ID) =>
+      schedules
+        .enabled(sessionID)
+        .pipe(Effect.flatMap((on) => (on ? Effect.void : Effect.fail(new Schedule.DisabledError()))))
     // Tools act only on the calling Session's schedules.
     const owned = (id: Schedule.ID, sessionID: Session.ID) =>
-      schedules.get(id).pipe(
+      allowed(sessionID).pipe(
+        Effect.andThen(schedules.get(id)),
         Effect.filterOrFail(
           (info) => info.sessionID === sessionID,
           () => new Schedule.NotFoundError({ scheduleID: id }),
         ),
       )
-    const notFound = (error: Schedule.NotFoundError) =>
-      new ToolFailure({ message: `Schedule not found: ${error.scheduleID}`, error })
+    const failure = (error: { readonly message: string }) => new ToolFailure({ message: error.message, error })
 
     yield* ctx.tool
       .transform((editor) => {
@@ -76,16 +81,9 @@ export const Plugin = {
             schedules.create(Schedule.toCreateInput(context.sessionID, input)).pipe(
               Effect.map((info) => {
                 const view = toView(info)
-                return {
-                  output: view,
-                  content: view.nextDueAt
-                    ? `Scheduled ${view.name ?? view.id}; next run ${view.nextDueAt}.`
-                    : `Scheduled ${view.name ?? view.id}.`,
-                }
+                return { output: view, content: `Scheduled: ${summary(view)}` }
               }),
-              Effect.mapError(
-                (error) => new ToolFailure({ message: error.message || "Unable to create schedule", error }),
-              ),
+              Effect.mapError(failure),
             ),
         })
         editor.add({
@@ -96,13 +94,14 @@ export const Plugin = {
           options: { namespace: "opencode", codemode: true },
           execute: (_, context) =>
             Effect.gen(function* () {
+              yield* allowed(context.sessionID)
               const now = DateTime.formatIso(yield* DateTime.now)
               const list = (yield* schedules.list({ sessionID: context.sessionID })).map(toView)
               return {
                 output: { now, schedules: list },
-                content: list.length === 0 ? "No schedules." : `${list.length} schedule(s).`,
+                content: [`Now: ${now}`, ...(list.length === 0 ? ["No schedules."] : list.map(summary))].join("\n"),
               }
-            }),
+            }).pipe(Effect.mapError(failure)),
         })
         editor.add({
           name: "schedule_pause",
@@ -113,8 +112,8 @@ export const Plugin = {
           execute: (input, context) =>
             owned(input.id, context.sessionID).pipe(
               Effect.andThen(schedules.pause(input.id)),
-              Effect.map((info) => ({ output: toView(info), content: `Paused ${info.name ?? info.id}.` })),
-              Effect.mapError(notFound),
+              Effect.map((info) => ({ output: toView(info), content: `Paused: ${summary(toView(info))}` })),
+              Effect.mapError(failure),
             ),
         })
         editor.add({
@@ -127,8 +126,8 @@ export const Plugin = {
           execute: (input, context) =>
             owned(input.id, context.sessionID).pipe(
               Effect.andThen(schedules.resume(input.id)),
-              Effect.map((info) => ({ output: toView(info), content: `Resumed ${info.name ?? info.id}.` })),
-              Effect.mapError(notFound),
+              Effect.map((info) => ({ output: toView(info), content: `Resumed: ${summary(toView(info))}` })),
+              Effect.mapError(failure),
             ),
         })
         editor.add({
@@ -141,7 +140,7 @@ export const Plugin = {
             owned(input.id, context.sessionID).pipe(
               Effect.andThen(schedules.remove(input.id)),
               Effect.as({ output: { id: input.id, removed: true }, content: `Deleted schedule ${input.id}.` }),
-              Effect.mapError(notFound),
+              Effect.mapError(failure),
             ),
         })
       })
@@ -164,6 +163,28 @@ export const Plugin = {
       })
     })
   }),
+}
+
+/** One line per schedule, for models that read tool content rather than output (Code Mode off). */
+function summary(view: View) {
+  const when = view.when
+  const trigger =
+    when.type === "in"
+      ? `in ${when.in}`
+      : when.type === "at"
+        ? `at ${when.at}`
+        : when.type === "every"
+          ? `every ${when.every}`
+          : `cron "${when.cron}"`
+  const prompt = view.prompt.length > 80 ? `${view.prompt.slice(0, 79)}…` : view.prompt
+  return [
+    `${view.id}${view.name ? ` "${view.name}"` : ""}: ${trigger} (${view.tz})`,
+    view.status,
+    view.nextDueAt && `next ${view.nextDueAt}`,
+    `prompt: ${JSON.stringify(prompt)}`,
+  ]
+    .filter(Boolean)
+    .join(", ")
 }
 
 function toView(info: Schedule.Info): View {
