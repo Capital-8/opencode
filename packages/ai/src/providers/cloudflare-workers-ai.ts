@@ -24,6 +24,8 @@ export type LanguageModelOptions = WorkersAIURL &
     readonly providerOptions?: OpenAIProviderOptionsInput
   }
 
+export type Config = LanguageModelOptions
+
 export type Settings = ProviderPackage.Settings &
   OpenAIProviderOptionsInput &
   WorkersAIURL & {
@@ -95,7 +97,7 @@ export const configure = (input: LanguageModelOptions) => {
 
 export const provider = { id, configure }
 
-export const model: ProviderPackage.Definition<Settings, OpenAIProviderOptionsInput>["model"] = (modelID, settings) =>
+export const model: ProviderPackage.Model<Settings, OpenAIProviderOptionsInput> = (modelID, settings) =>
   configure(config(settings)).model(modelID)
 export const imageModel = (modelID: string, settings: Settings) => {
   const input = config(settings)

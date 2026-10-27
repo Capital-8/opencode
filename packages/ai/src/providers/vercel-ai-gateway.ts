@@ -104,6 +104,8 @@ export type Options = Omit<RouteDefaultsInput, "providerOptions"> &
     readonly providerOptions?: ProviderOptionsInput
   }
 
+export type Config = Options
+
 export type Settings = ProviderPackage.Settings & ProviderOptionsInput & { readonly apiKey?: string }
 
 const GatewayOptionsSchema = Schema.Struct({
@@ -258,26 +260,24 @@ export const responses = provider.responses
 export const chat = provider.chat
 export const image = provider.image
 
-export const model: ProviderPackage.Definition<Settings, ProviderOptionsInput>["model"] = (modelID, settings) =>
+export const model: ProviderPackage.Model<Settings, ProviderOptionsInput> = (modelID, settings) =>
   configure(config(settings)).model(modelID)
-export const messagesModel: ProviderPackage.Definition<Settings, ProviderOptionsInput>["model"] = (modelID, settings) =>
+export const messagesModel: ProviderPackage.Model<Settings, ProviderOptionsInput> = (modelID, settings) =>
   configure(config(settings)).messages(modelID)
-export const responsesModel: ProviderPackage.Definition<Settings, ProviderOptionsInput>["model"] = (
-  modelID,
-  settings,
-) => configure(config(settings)).responses(modelID)
-export const chatModel: ProviderPackage.Definition<Settings, ProviderOptionsInput>["model"] = (modelID, settings) =>
+export const responsesModel: ProviderPackage.Model<Settings, ProviderOptionsInput> = (modelID, settings) =>
+  configure(config(settings)).responses(modelID)
+export const chatModel: ProviderPackage.Model<Settings, ProviderOptionsInput> = (modelID, settings) =>
   configure(config(settings)).chat(modelID)
-export const imageModel = (modelID: string, settings: Settings) => {
+export const imageModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).image(modelID, input.providerOptions)
 }
-export const decisionModel = (modelID: string, settings: Settings) => {
+export const decisionModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).decision(modelID, input.providerOptions)
 }
 
-function config({ apiKey, baseURL, headers, body, ...providerOptions }: Settings) {
+function config({ apiKey, baseURL, headers, body, ...providerOptions }: Settings = {}) {
   return {
     apiKey,
     baseURL,

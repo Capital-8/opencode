@@ -195,15 +195,13 @@ const config = ({
   throw new ProviderConfigurationError({ provider: id, message: "Azure requires resourceName or baseURL" })
 }
 
-export const responsesModel: ProviderPackage.Definition<
+export const responsesModel: ProviderPackage.Model<
   Settings,
   OpenAIProviderOptionsInput,
   typeof responsesRoute.compact
->["model"] = (modelID, settings) => configure(config(settings)).responses(modelID)
-export const chatModel: ProviderPackage.Definition<Settings, OpenAIProviderOptionsInput>["model"] = (
-  modelID,
-  settings,
-) => configure(config(settings)).chat(modelID)
+> = (modelID, settings) => configure(config(settings)).responses(modelID)
+export const chatModel: ProviderPackage.Model<Settings, OpenAIProviderOptionsInput> = (modelID, settings) =>
+  configure(config(settings)).chat(modelID)
 export const imageModel = (modelID: string, settings: Settings) => {
   const input = config(settings)
   return configure(input).image(modelID, input.providerOptions)

@@ -86,6 +86,8 @@ export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
     readonly providerOptions?: OpenRouterProviderOptionsInput
   }
 
+export type Config = LanguageModelOptions
+
 export type Settings = ProviderPackage.Settings &
   OpenRouterProviderOptionsInput & {
     readonly apiKey?: string
@@ -227,20 +229,18 @@ export const configure = (input: LanguageModelOptions = {}) => {
 export const provider = configure()
 export const decision = provider.decision
 export const image = provider.image
-export const model: ProviderPackage.Definition<Settings, OpenRouterProviderOptionsInput>["model"] = (
-  modelID,
-  settings,
-) => configure(config(settings)).model(modelID)
-export const imageModel = (modelID: string, settings: Settings) => {
+export const model: ProviderPackage.Model<Settings, OpenRouterProviderOptionsInput> = (modelID, settings) =>
+  configure(config(settings)).model(modelID)
+export const imageModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).image(modelID, input.providerOptions)
 }
-export const decisionModel = (modelID: string, settings: Settings) => {
+export const decisionModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).decision(modelID, input.providerOptions)
 }
 
-function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings) {
+function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings = {}) {
   return {
     apiKey,
     baseURL,

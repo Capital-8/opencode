@@ -26,6 +26,8 @@ export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
     readonly providerOptions?: ProviderOptions
   }
 
+export type Config = LanguageModelOptions
+
 export type Settings = ProviderPackage.Settings &
   ProviderOptions & {
     readonly apiKey?: string
@@ -96,9 +98,9 @@ export const configure = (input: LanguageModelOptions = {}) => {
 
 export const provider = configure()
 
-export const model: ProviderPackage.Definition<Settings, ProviderOptions>["model"] = (
+export const model: ProviderPackage.Model<Settings, ProviderOptions> = (
   modelID,
-  { apiKey, baseURL, body, headers, ...providerOptions },
+  { apiKey, baseURL, body, headers, ...providerOptions }: Settings = {},
 ) =>
   configure({
     apiKey,

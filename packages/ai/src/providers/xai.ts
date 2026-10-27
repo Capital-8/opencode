@@ -23,6 +23,8 @@ export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
     readonly providerOptions?: XAIProviderOptionsInput
   }
 
+export type Config = LanguageModelOptions
+
 export type Settings = ProviderPackage.Settings &
   XAIProviderOptionsInput & {
     readonly apiKey?: string
@@ -105,17 +107,16 @@ export const configure = (input: LanguageModelOptions = {}) => {
 }
 
 export const provider = configure()
-export const model: ProviderPackage.Definition<
-  Settings,
-  XAIProviderOptionsInput,
-  typeof responsesRoute.compact
->["model"] = (modelID, settings) => configure(config(settings)).model(modelID)
-export const imageModel = (modelID: string, settings: Settings) => {
+export const model: ProviderPackage.Model<Settings, XAIProviderOptionsInput, typeof responsesRoute.compact> = (
+  modelID,
+  settings,
+) => configure(config(settings)).model(modelID)
+export const imageModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).image(modelID, input.providerOptions)
 }
 
-function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings) {
+function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings = {}) {
   return {
     apiKey,
     baseURL,

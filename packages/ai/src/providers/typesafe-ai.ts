@@ -12,6 +12,8 @@ export type Options = ProviderAuthOption<"optional"> & {
   readonly http?: HttpOptions.Input
 }
 
+export type Config = Options
+
 export type Settings = ProviderPackage.Settings & { readonly apiKey?: string }
 
 export const configure = (input: Options = {}) => {
@@ -32,7 +34,7 @@ export const configure = (input: Options = {}) => {
 export const provider = configure()
 export const decision = provider.decision
 
-export const decisionModel = (modelID: string, { apiKey, baseURL, body, headers, ...providerOptions }: Settings) =>
+export const decisionModel = (modelID: string, { apiKey, baseURL, body, headers, ...providerOptions }: Settings = {}) =>
   configure({ apiKey, baseURL, headers, http: body === undefined ? undefined : { body } }).decision(
     modelID,
     providerOptions,

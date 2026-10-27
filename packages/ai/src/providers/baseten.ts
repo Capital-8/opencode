@@ -18,6 +18,8 @@ export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
     readonly providerOptions?: OpenAIProviderOptionsInput
   }
 
+export type Config = LanguageModelOptions
+
 export interface BasetenDecisionOptions {
   readonly [key: string]: unknown
   readonly max_len?: number
@@ -84,14 +86,14 @@ export const configure = (input: LanguageModelOptions = {}) => {
 export const provider = configure()
 export const decision = provider.decision
 
-export const model: ProviderPackage.Definition<Settings, OpenAIProviderOptionsInput>["model"] = (modelID, settings) =>
+export const model: ProviderPackage.Model<Settings, OpenAIProviderOptionsInput> = (modelID, settings) =>
   configure(config(settings)).model(modelID)
-export const decisionModel = (modelID: string, settings: Settings) => {
+export const decisionModel = (modelID: string, settings?: Settings) => {
   const input = config(settings)
   return configure(input).decision(modelID, input.providerOptions)
 }
 
-function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings) {
+function config({ apiKey, baseURL, body, headers, ...providerOptions }: Settings = {}) {
   return {
     apiKey,
     baseURL,

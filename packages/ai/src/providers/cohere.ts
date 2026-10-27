@@ -18,6 +18,8 @@ export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> &
 export type Settings<Options = CohereChat.ProviderOptionsInput> = ProviderPackage.Settings &
   Options & { readonly apiKey?: string; readonly baseURL?: string }
 
+export type Config = LanguageModelOptions
+
 export const route = CohereChat.route
 export const chatRoute = Route.make({
   id: "cohere-chat-completions",
@@ -50,9 +52,9 @@ export const configure = (input: LanguageModelOptions = {}) => {
   }
 }
 export const provider = configure()
-export const model: ProviderPackage.Definition<Settings, CohereChat.ProviderOptionsInput>["model"] = (
+export const model: ProviderPackage.Model<Settings, CohereChat.ProviderOptionsInput> = (
   modelID,
-  { apiKey, baseURL, body, headers, ...providerOptions },
+  { apiKey, baseURL, body, headers, ...providerOptions }: Settings = {},
 ) =>
   configure({
     apiKey,
