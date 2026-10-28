@@ -461,6 +461,27 @@ describe("Schedule", () => {
     }),
   )
 
+  it.effect("keeps the run count when paused while a prompt is being admitted", () =>
+    Effect.gen(function* () {
+      const schedules = yield* setup()
+      const schedule = yield* schedules.create({
+        sessionID,
+        when: { type: "every", every: "1 minute" },
+        action: { type: "prompt", prompt: "poll" },
+      })
+      yield* TestClock.adjust("1 minute")
+      duringWake = schedules.pause(schedule.id).pipe(Effect.orDie, Effect.asVoid)
+      yield* schedules.tick
+      expect(yield* schedules.get(schedule.id)).toMatchObject({ status: "paused", runCount: 1 })
+      yield* deliver
+
+      yield* schedules.resume(schedule.id)
+      yield* TestClock.adjust("1 minute")
+      yield* schedules.tick
+      expect(yield* pending).toEqual([messageID(schedule, 2)])
+    }),
+  )
+
   it.effect("run sleeps until the next schedule is due", () =>
     Effect.gen(function* () {
       const schedules = yield* setup()
@@ -592,6 +613,9 @@ describe("Schedule", () => {
       expect(yield* at("2026-11-02T09:30:00-0500")).toBe("2026-11-02T14:30:00.000Z")
       expect(yield* at("2026-11-02T09:30:00-05:00")).toBe("2026-11-02T14:30:00.000Z")
       expect(yield* at("2026-11-02T09:30")).toBe("2026-11-02T14:30:00.000Z")
+      expect(yield* at("2026-11-02 09:30:00-05:00")).toBe("2026-11-02T14:30:00.000Z")
+      expect(yield* at("2026-11-02 14:30:00Z")).toBe("2026-11-02T14:30:00.000Z")
+      expect(yield* at("2026-11-02 09:30")).toBe("2026-11-02T14:30:00.000Z")
     }),
   )
 

@@ -84,7 +84,7 @@ const duration = (value: string) =>
 const millis = (value: string) =>
   Option.getOrThrowWith(ScheduleSchema.durationMillis(value), () => new Error(`Invalid duration: ${value}`))
 
-const OFFSET = /T.*(?:z|[+-]\d{2}:?\d{2})$/i
+const OFFSET = /\d(?:z|[+-]\d{2}:?\d{2})$/i
 
 /** Parses an instant with an offset, or a wall-clock time in `zone`. */
 const parseAt = (input: string, zone: DateTime.TimeZone) =>
@@ -212,17 +212,23 @@ const layer = Layer.effect(
       const next = following(row, now)
       const remaining = row.remaining_runs === null ? null : row.remaining_runs - 1
       const done = finished(row, next, remaining)
-      yield* update(row, {
-        run_count: run,
-        last_message_id: id,
-        last_fired_at: now,
-        last_outcome: late ? "late" : "fired",
-        retry_at: null,
-        remaining_runs: remaining,
-        status: done ? "done" : "active",
-        next_due_at: done ? null : next,
-        time_updated: now,
-      })
+      // Record the run even if a pause landed during the prompt, or the next firing would reuse this message id.
+      yield* db
+        .update(ScheduleTable)
+        .set({
+          run_count: run,
+          last_message_id: id,
+          last_fired_at: now,
+          last_outcome: late ? "late" : "fired",
+          retry_at: null,
+          remaining_runs: remaining,
+          ...(done ? { status: "done" as const } : {}),
+          next_due_at: done ? null : next,
+          time_updated: now,
+        })
+        .where(eq(ScheduleTable.id, row.id))
+        .run()
+        .pipe(Effect.orDie)
     })
 
     const step = Effect.fnUntraced(function* (row: Row, now: number) {
