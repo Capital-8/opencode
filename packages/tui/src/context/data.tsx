@@ -13,7 +13,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
   init: (props: { directory: string }) => {
     const client = useClient()
     const data = createData({
-      api: () => client.api,
+      api: () => client.mediaRefApi,
       event: client.event,
       connection: client.connection,
       directory: props.directory,

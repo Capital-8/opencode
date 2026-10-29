@@ -68,6 +68,7 @@ import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { TodoItem } from "../../component/todo-item"
 import { DialogImagePreview } from "../../component/dialog-image-preview"
+import { takeDraft } from "../../component/prompt/draft-stash"
 import { createMediaSource } from "../../component/media-source"
 import { statusLabel } from "../../component/dialog-workspace-file-changes"
 import { DialogMessage } from "./dialog-message"
@@ -388,8 +389,13 @@ export function Session(props: {
     saveScrollAnchor(true)
   })
   const [prompt, setPrompt] = createSignal<PromptRef>()
+  let lastPrompt: PromptRef | undefined
+  // For work that finishes after an await: the composer may have remounted, or unmounted with its tab, in which case
+  // its set() saves the tab's draft.
+  const sessionPrompt = () => prompt() ?? lastPrompt
   const bind = (r: PromptRef | undefined) => {
     setPrompt(r)
+    if (r) lastPrompt = r
     promptRef.set(r)
     if (seeded || !route.prompt || !r) return
     seeded = true
@@ -651,15 +657,14 @@ export function Session(props: {
       if (type !== "provider.free-limit" && type !== "provider.go-limit") return
       if (handledLimits.has(event.data.assistantMessageID)) return
       handledLimits.add(event.data.assistantMessageID)
-      const current = prompt()
-      if (!current) return
-      const empty = () =>
-        !current.current.text.trim() &&
-        !current.current.files?.length &&
-        !current.current.agents?.length &&
-        !current.current.skills?.length &&
-        !current.current.pasted.length
-      if (!empty()) return
+      const empty = (ref: PromptRef | undefined): ref is PromptRef =>
+        !!ref &&
+        !ref.current.text.trim() &&
+        !ref.current.files?.length &&
+        !ref.current.agents?.length &&
+        !ref.current.skills?.length &&
+        !ref.current.pasted.length
+      if (!empty(prompt())) return
       const list = messages()
       const end = list.findIndex((item) => item.id === event.data.assistantMessageID)
       const earlier = end < 0 ? [] : list.slice(0, end).toReversed()
@@ -673,8 +678,10 @@ export function Session(props: {
             return null
           })
         : undefined
-      // Media refs load before the prompt comes back; typing meanwhile keeps the draft and skips the offer.
-      if (restored === null || sessionDisposed || route.sessionID !== event.data.sessionID || !empty()) return
+      // Media refs load before the prompt comes back; typing or a shell command meanwhile keeps it and skips the offer.
+      if (restored === null || sessionDisposed || route.sessionID !== event.data.sessionID) return
+      const current = prompt()
+      if (!empty(current) || current.mode !== "normal") return
       if (restored) current.set({ ...restored, pasted: [] })
       if (type === "provider.go-limit" || dialog.stack.length > 0) return
       if (goUpsell.dontShow || goUpsellMemory.dontShow) return
@@ -755,25 +762,25 @@ export function Session(props: {
     }),
   )
   const runPendingAction = createSingleFlight<string>()
-  const mutatePending = async (action: PendingAction, inboxID: string, failureLabel?: string) => {
-    const result = await runPendingAction(inboxID, async () => {
-      const request =
-        action === "steer"
-          ? client.api.session.inbox.update({ sessionID: route.sessionID, inboxID, delivery: "steer" })
-          : action === "queue"
-            ? client.api.session.inbox.update({ sessionID: route.sessionID, inboxID, delivery: "queue" })
-            : client.api.session.inbox.cancel({ sessionID: route.sessionID, inboxID })
-      const error = await request.then(
-        () => undefined,
-        (error) => error,
-      )
-      if (!error) return true
-      const label = failureLabel ?? (action === "cancel" ? "delete" : action)
-      toast.show({ title: `Failed to ${label} pending prompt`, message: errorMessage(error), variant: "error" })
-      return false
-    })
-    return result ?? false
+  // Uses the captured sessionID: after an await, route.sessionID may already name another tab, or none.
+  const requestPending = async (action: PendingAction, inboxID: string, failureLabel?: string) => {
+    const request =
+      action === "steer"
+        ? client.api.session.inbox.update({ sessionID, inboxID, delivery: "steer" })
+        : action === "queue"
+          ? client.api.session.inbox.update({ sessionID, inboxID, delivery: "queue" })
+          : client.api.session.inbox.cancel({ sessionID, inboxID })
+    const error = await request.then(
+      () => undefined,
+      (error) => error,
+    )
+    if (!error) return true
+    const label = failureLabel ?? (action === "cancel" ? "delete" : action)
+    toast.show({ title: `Failed to ${label} pending prompt`, message: errorMessage(error), variant: "error" })
+    return false
   }
+  const mutatePending = async (action: PendingAction, inboxID: string) =>
+    (await runPendingAction(inboxID, () => requestPending(action, inboxID))) ?? false
   const openQueuedPrompts = () =>
     dialog.replace(() => (
       <DialogSelect
@@ -813,21 +820,24 @@ export function Session(props: {
                 return
               }
               // The cancel sweeps blobs nothing else references, so media refs load into the draft first.
-              void restoredPromptInput(queued.payload, client.media.read)
-                .then(async (restored) => {
-                  if (!(await mutatePending("cancel", queued.id, "undo"))) return
-                  target.setMode("normal")
-                  target.set(appendPrompt(target.current, { ...restored, pasted: [] }, renderer.widthMethod))
-                  dialog.clear()
-                  target.focus()
-                })
-                .catch((error) =>
-                  toast.show({
-                    title: "Failed to undo pending prompt",
-                    message: errorMessage(error),
-                    variant: "error",
-                  }),
-                )
+              void runPendingAction(queued.id, async () => {
+                const restored = await restoredPromptInput(queued.payload, client.media.read)
+                if (!(await requestPending("cancel", queued.id, "undo"))) return
+                const live = sessionPrompt() ?? target
+                // Once the tab is gone its composer text sits in the draft stash, so the prompt joins that.
+                const base = sessionDisposed ? (takeDraft(sessionID)?.prompt ?? live.current) : live.current
+                if (!sessionDisposed) live.setMode("normal")
+                live.set(appendPrompt(base, { ...restored, pasted: [] }, renderer.widthMethod))
+                if (sessionDisposed) return
+                dialog.clear()
+                live.focus()
+              }).catch((error) =>
+                toast.show({
+                  title: "Failed to undo pending prompt",
+                  message: errorMessage(error),
+                  variant: "error",
+                }),
+              )
             },
           },
         ]}
@@ -1068,7 +1078,7 @@ export function Session(props: {
           <DialogTimeline
             sessionID={route.sessionID}
             onMove={jumpToMessage}
-            setPrompt={(value) => promptRef.current?.set(value)}
+            setPrompt={(value) => sessionPrompt()?.set(value)}
           />
         ))
       },
@@ -1128,22 +1138,24 @@ export function Session(props: {
           dialog.clear()
           return
         }
-        const sessionID = route.sessionID
-        const target = prompt()
-        void (async () => {
+        const pending = pendingDeliveries().has(message.id)
+        const undo = async () => {
           const restored = await restoredPromptInput(message, client.media.read)
-          if (pendingDeliveries().has(message.id)) {
-            if (!(await mutatePending("cancel", message.id))) return
+          if (pending) {
+            if (!(await requestPending("cancel", message.id))) return
           } else {
             await client.api.session.interrupt({ sessionID })
             await client.api.experimental.session.wait({ sessionID })
             await client.api.session.revert.stage({ sessionID, messageID: message.id })
           }
-          target?.set({
+          sessionPrompt()?.set({
             ...restored,
             pasted: [],
           })
-        })().catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
+        }
+        void (pending ? runPendingAction(message.id, undo) : undo()).catch((error) =>
+          toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }),
+        )
         dialog.clear()
       },
     },
@@ -1517,6 +1529,7 @@ export function Session(props: {
         legacyTurns: legacy,
         config,
         mutatePending,
+        setPrompt: (value) => sessionPrompt()?.set(value),
         pendingDelivery: (inboxID) => pendingDeliveries().get(inboxID),
       }}
     >
@@ -2384,7 +2397,6 @@ function UserMessage(props: { message: SessionMessageUser }) {
   const delivery = createMemo(() => ctx.pendingDelivery(props.message.id))
   const dialog = useDialog()
   const renderer = useRenderer()
-  const promptRef = usePromptRef()
 
   const updatePendingSteer = async (action: "queue" | "cancel") => {
     if (await ctx.mutatePending(action, props.message.id)) dialog.clear()
@@ -2427,11 +2439,7 @@ function UserMessage(props: { message: SessionMessageUser }) {
             // The dialog outlives this row, whose props go stale when a resync drops the message.
             const messageID = props.message.id
             dialog.replace(() => (
-              <DialogMessage
-                messageID={messageID}
-                sessionID={ctx.sessionID}
-                setPrompt={(value) => promptRef.current?.set(value)}
-              />
+              <DialogMessage messageID={messageID} sessionID={ctx.sessionID} setPrompt={ctx.setPrompt} />
             ))
           }}
           paddingTop={1}

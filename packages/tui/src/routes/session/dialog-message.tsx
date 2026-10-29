@@ -39,14 +39,13 @@ export function DialogMessage(props: {
           description: "undo messages and file changes",
           onSelect: (dialog) => {
             const value = message()
+            const setPrompt = props.setPrompt
+            // The composer changes only once the revert is staged, so a failed revert leaves the draft alone.
             void (async () => {
-              if (value?.type === "user" && props.setPrompt) {
-                props.setPrompt({
-                  ...(await restoredPromptInput(value, client.media.read)),
-                  pasted: [],
-                })
-              }
+              const restored =
+                value?.type === "user" && setPrompt ? await restoredPromptInput(value, client.media.read) : undefined
               await client.api.session.revert.stage({ sessionID: props.sessionID, messageID: props.messageID })
+              if (restored) setPrompt?.({ ...restored, pasted: [] })
             })().catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
             dialog.clear()
           },

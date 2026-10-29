@@ -20,6 +20,16 @@ export function DialogFork(props: { sessionID: string; messageID?: string; onMov
 
   const fork = async (messageID?: string) => {
     setPending(true)
+    const message = messageID ? data.session.message.get(props.sessionID, messageID) : undefined
+    // Read media refs before forking: a fork without its prompt is not what was asked for.
+    const prompt =
+      message?.type === "user"
+        ? await restoredPromptInput(message, client.media.read).catch((error) => {
+            toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
+            return null
+          })
+        : undefined
+    if (prompt === null) return dialog.clear()
     const result = await client.api.session
       .fork({
         sessionID: props.sessionID,
@@ -30,14 +40,6 @@ export function DialogFork(props: { sessionID: string; messageID?: string; onMov
         return undefined
       })
     if (!result) return dialog.clear()
-    const message = messageID ? data.session.message.get(props.sessionID, messageID) : undefined
-    const prompt =
-      message?.type === "user"
-        ? await restoredPromptInput(message, client.media.read).catch((error) => {
-            toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
-            return undefined
-          })
-        : undefined
     route.navigate({
       sessionID: result.id,
       type: "session",

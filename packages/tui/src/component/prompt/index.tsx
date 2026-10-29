@@ -691,6 +691,11 @@ export function Prompt(props: PromptProps) {
       setStore("mode", mode)
     },
     set(prompt) {
+      // An async undo or revert can finish after its tab closed; its prompt waits in the tab's draft instead.
+      if (disposed || input.isDestroyed) {
+        saveDraft(stashSessionID, { prompt, cursor: Infinity })
+        return
+      }
       input.setText(prompt.text)
       setStore("prompt", prompt)
       restoreExtmarksFromPrompt(prompt)
