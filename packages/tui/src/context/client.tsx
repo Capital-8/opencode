@@ -3,6 +3,7 @@ import { createClientConnection, createPersistentPtyClient } from "@opencode/cli
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { onCleanup } from "solid-js"
 import { createSimpleContext } from "./helper"
+import { createMediaCache } from "../util/media"
 import { useLog } from "./log"
 
 type ManagedService = {
@@ -22,6 +23,7 @@ export const { use: useClient, provider: ClientProvider } = createSimpleContext(
     let url = props.url
     let headers = props.headers
     let persistentPty = url ? createPersistentPtyClient(api, { url }) : undefined
+    const media = createMediaCache(() => api)
 
     const connection = createClientConnection(api, {
       reconnect: service
@@ -63,6 +65,7 @@ export const { use: useClient, provider: ClientProvider } = createSimpleContext(
         listen: events.listen,
       },
       connection,
+      media,
       restart: service?.restart,
     }
   },

@@ -4,7 +4,7 @@ import { render, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import "./component/spinner-renderable"
 import { Effect, Latch } from "effect"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { OpenCode, type SessionInfo } from "@opencode/client"
+import { OpenCode, withMediaRefs, type SessionInfo } from "@opencode/client"
 import { Global } from "@opencode/util/global"
 import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
@@ -223,7 +223,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     headers,
     fetch: noTimeoutFetch,
   }
-  const api = OpenCode.make(options)
+  const api = withMediaRefs(OpenCode.make(options))
   const location = yield* Effect.tryPromise(() => api.file.list({ location: { directory: process.cwd() } })).pipe(
     Effect.map((response) => response.location),
     Effect.catch(() => Effect.tryPromise(() => api.location.get())),
@@ -237,7 +237,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         reconnect: async (signal: AbortSignal) => {
           const endpoint = await managed.reconnect(signal)
           const next = { baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch: noTimeoutFetch }
-          return { api: OpenCode.make(next), url: endpoint.url, headers: next.headers }
+          return { api: withMediaRefs(OpenCode.make(next)), url: endpoint.url, headers: next.headers }
         },
         restart: managed.restart,
       }

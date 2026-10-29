@@ -33,15 +33,17 @@ import {
   type Renderable,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
-import type {
-  SessionMessageInfo,
-  SessionMessageAssistant,
-  SessionMessageAssistantReasoning,
-  SessionMessageAssistantText,
-  SessionMessageAssistantTool,
-  SessionMessageUser,
-  SessionInfo,
-  ModelInfo,
+import {
+  mediaHashFromUri,
+  type PromptAttachment,
+  type SessionMessageInfo,
+  type SessionMessageAssistant,
+  type SessionMessageAssistantReasoning,
+  type SessionMessageAssistantText,
+  type SessionMessageAssistantTool,
+  type SessionMessageUser,
+  type SessionInfo,
+  type ModelInfo,
 } from "@opencode/client"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
@@ -66,6 +68,7 @@ import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { TodoItem } from "../../component/todo-item"
 import { DialogImagePreview } from "../../component/dialog-image-preview"
+import { createMediaSource } from "../../component/media-source"
 import { statusLabel } from "../../component/dialog-workspace-file-changes"
 import { DialogMessage } from "./dialog-message"
 import { DialogFork } from "./dialog-fork"
@@ -80,7 +83,7 @@ import { errorMessage } from "../../util/error"
 import { useToast } from "../../ui/toast"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
-import { projectedPromptInput } from "../../prompt/codec"
+import { restoredPromptInput } from "../../prompt/codec"
 import { appendPrompt } from "../../prompt/history"
 import { deduplicateVisibleImages } from "../../prompt/attachment"
 import { useEpilogue } from "../../context/epilogue"
@@ -642,32 +645,37 @@ export function Session(props: {
   // Restore the prompt when the free allowance or an OpenCode Go limit stops it, and offer OpenCode Go on the first free
   // allowance hit in a day.
   onCleanup(
-    data.on("session.step.failed", (event) => {
+    data.on("session.step.failed", async (event) => {
       const type = event.data.error.type
       if (event.data.sessionID !== route.sessionID) return
       if (type !== "provider.free-limit" && type !== "provider.go-limit") return
       if (handledLimits.has(event.data.assistantMessageID)) return
       handledLimits.add(event.data.assistantMessageID)
       const current = prompt()
-      const wasEmpty = Boolean(
-        current &&
-          !current.current.text.trim() &&
-          !current.current.files?.length &&
-          !current.current.agents?.length &&
-          !current.current.skills?.length &&
-          !current.current.pasted.length,
-      )
-      if (!wasEmpty || !current) return
+      if (!current) return
+      const empty = () =>
+        !current.current.text.trim() &&
+        !current.current.files?.length &&
+        !current.current.agents?.length &&
+        !current.current.skills?.length &&
+        !current.current.pasted.length
+      if (!empty()) return
       const list = messages()
       const end = list.findIndex((item) => item.id === event.data.assistantMessageID)
-      for (let i = end - 1; i >= 0; i--) {
-        const item = list[i]
-        if (!item || item.type === "shell" || item.type === "idle") break
-        if (item.type === "user" && !data.session.input.has(route.sessionID, item.id)) {
-          current.set({ ...projectedPromptInput(item), pasted: [] })
-          break
-        }
-      }
+      const earlier = end < 0 ? [] : list.slice(0, end).toReversed()
+      const stop = earlier.findIndex((item) => item.type === "shell" || item.type === "idle")
+      const recalled = (stop < 0 ? earlier : earlier.slice(0, stop)).find(
+        (item): item is SessionMessageUser => item.type === "user" && !data.session.input.has(route.sessionID, item.id),
+      )
+      const restored = recalled
+        ? await restoredPromptInput(recalled, client.media.read).catch((error) => {
+            toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
+            return null
+          })
+        : undefined
+      // Media refs load before the prompt comes back; typing meanwhile keeps the draft and skips the offer.
+      if (restored === null || sessionDisposed || route.sessionID !== event.data.sessionID || !empty()) return
+      if (restored) current.set({ ...restored, pasted: [] })
       if (type === "provider.go-limit" || dialog.stack.length > 0) return
       if (goUpsell.dontShow || goUpsellMemory.dontShow) return
       const now = Date.now()
@@ -804,19 +812,22 @@ export function Session(props: {
                 toast.show({ message: "Leave shell mode before undoing a queued prompt", variant: "error" })
                 return
               }
-              void mutatePending("cancel", queued.id, "undo").then((undone) => {
-                if (!undone) return
-                target.setMode("normal")
-                target.set(
-                  appendPrompt(
-                    target.current,
-                    { ...projectedPromptInput(queued.payload), pasted: [] },
-                    renderer.widthMethod,
-                  ),
+              // The cancel sweeps blobs nothing else references, so media refs load into the draft first.
+              void restoredPromptInput(queued.payload, client.media.read)
+                .then(async (restored) => {
+                  if (!(await mutatePending("cancel", queued.id, "undo"))) return
+                  target.setMode("normal")
+                  target.set(appendPrompt(target.current, { ...restored, pasted: [] }, renderer.widthMethod))
+                  dialog.clear()
+                  target.focus()
+                })
+                .catch((error) =>
+                  toast.show({
+                    title: "Failed to undo pending prompt",
+                    message: errorMessage(error),
+                    variant: "error",
+                  }),
                 )
-                dialog.clear()
-                target.focus()
-              })
             },
           },
         ]}
@@ -1120,6 +1131,7 @@ export function Session(props: {
         const sessionID = route.sessionID
         const target = prompt()
         void (async () => {
+          const restored = await restoredPromptInput(message, client.media.read)
           if (pendingDeliveries().has(message.id)) {
             if (!(await mutatePending("cancel", message.id))) return
           } else {
@@ -1128,7 +1140,7 @@ export function Session(props: {
             await client.api.session.revert.stage({ sessionID, messageID: message.id })
           }
           target?.set({
-            ...projectedPromptInput(message),
+            ...restored,
             pasted: [],
           })
         })().catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
@@ -2354,11 +2366,14 @@ function UserMessage(props: { message: SessionMessageUser }) {
   const newDesigns = useNewDesigns()
   const data = useData()
   const local = useLocal()
-  const files = createMemo(() => deduplicateVisibleImages(props.message.files ?? []))
+  // Opted-in reads leave stored files as `media:` refs, a PromptAttachment variant the generated message type omits.
+  const files = createMemo(() => deduplicateVisibleImages<PromptAttachment>(props.message.files ?? []))
   const skills = createMemo(() => props.message.skills ?? [])
   const images = createMemo(() =>
     files().flatMap((file) =>
-      file.mime.startsWith("image/") ? [{ uri: `data:${file.mime};base64,${file.data}` }] : [],
+      file.mime.startsWith("image/")
+        ? [{ uri: "uri" in file ? file.uri : `data:${file.mime};base64,${file.data}` }]
+        : [],
     ),
   )
   const themes = useThemes()
@@ -2676,6 +2691,7 @@ function SessionImages(props: { images: readonly { uri: string }[]; paddingLeft?
         <For each={visible()}>
           {(image, index) => {
             const [failed, setFailed] = createSignal(false)
+            const media = createMediaSource(() => image.uri)
             return (
               <box
                 width={height() * 2}
@@ -2690,9 +2706,9 @@ function SessionImages(props: { images: readonly { uri: string }[]; paddingLeft?
                   dialog.replace(() => <DialogImagePreview images={images()} initial={index()} />)
                 }}
               >
-                <Show when={!failed()} fallback={<text>No preview</text>}>
+                <Show when={!failed() && !media.failed()} fallback={<text>No preview</text>}>
                   <image
-                    source={image.uri}
+                    source={media.source()}
                     fit="cover"
                     protocol="auto"
                     width="100%"
@@ -2718,7 +2734,9 @@ function SessionImages(props: { images: readonly { uri: string }[]; paddingLeft?
 
 function inlineToolImages(part: SessionMessageAssistantTool) {
   return toolDisplayContent(part.state).flatMap((content) =>
-    content.type === "file" && content.mime.startsWith("image/") && content.uri.startsWith("data:image/")
+    content.type === "file" &&
+    content.mime.startsWith("image/") &&
+    (content.uri.startsWith("data:image/") || mediaHashFromUri(content.uri))
       ? [{ uri: content.uri }]
       : [],
   )

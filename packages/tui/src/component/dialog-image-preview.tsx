@@ -3,6 +3,7 @@ import { createMemo, createSignal } from "solid-js"
 import { Keymap } from "../context/keymap"
 import { useTheme } from "../context/theme"
 import { DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
+import { createMediaSource } from "./media-source"
 
 type ImagePreviewItem = Readonly<{
   uri: string
@@ -14,8 +15,10 @@ export function DialogImagePreview(props: { images: readonly ImagePreviewItem[];
   const dimensions = useTerminalDimensions()
   const theme = useTheme().surface("dialog")
   const [index, setIndex] = createSignal(Math.max(0, Math.min(props.images.length - 1, props.initial)))
-  const [failed, setFailed] = createSignal(false)
+  const [loadFailed, setFailed] = createSignal(false)
   const current = createMemo(() => props.images[index()])
+  const media = createMediaSource(() => current().uri)
+  const failed = () => loadFailed() || media.failed()
   const imageHeight = createMemo(() => Math.max(3, dimensions().height - 8))
 
   dialog.setSize("xlarge")
@@ -73,7 +76,7 @@ export function DialogImagePreview(props: { images: readonly ImagePreviewItem[];
     >
       <image
         id="prompt-image-viewer-image"
-        source={current().uri}
+        source={media.source()}
         fit="fit"
         protocol="auto"
         width="100%"

@@ -8,7 +8,7 @@ import { DIALOG_LIST_INSET, DialogHeader, DialogLayout, useDialog } from "../../
 import { useToast } from "../../ui/toast"
 import { errorMessage } from "../../util/error"
 import { Locale } from "../../util/locale"
-import { projectedPromptInput } from "../../prompt/codec"
+import { restoredPromptInput } from "../../prompt/codec"
 
 export function DialogFork(props: { sessionID: string; messageID?: string; onMove?: (messageID?: string) => void }) {
   const data = useData()
@@ -31,7 +31,13 @@ export function DialogFork(props: { sessionID: string; messageID?: string; onMov
       })
     if (!result) return dialog.clear()
     const message = messageID ? data.session.message.get(props.sessionID, messageID) : undefined
-    const prompt = message?.type === "user" ? projectedPromptInput(message) : undefined
+    const prompt =
+      message?.type === "user"
+        ? await restoredPromptInput(message, client.media.read).catch((error) => {
+            toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
+            return undefined
+          })
+        : undefined
     route.navigate({
       sessionID: result.id,
       type: "session",

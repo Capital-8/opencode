@@ -7,7 +7,7 @@ import { useClient } from "../../context/client"
 import { errorMessage } from "../../util/error"
 import { DialogFork } from "./dialog-fork"
 import type { PromptInfo } from "../../prompt/history"
-import { projectedPromptInput } from "../../prompt/codec"
+import { restoredPromptInput } from "../../prompt/codec"
 import { useNewDesigns } from "../../config"
 
 export function DialogMessage(props: {
@@ -39,15 +39,15 @@ export function DialogMessage(props: {
           description: "undo messages and file changes",
           onSelect: (dialog) => {
             const value = message()
-            if (value?.type === "user") {
-              props.setPrompt?.({
-                ...projectedPromptInput(value),
-                pasted: [],
-              })
-            }
-            void client.api.session.revert
-              .stage({ sessionID: props.sessionID, messageID: props.messageID })
-              .catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
+            void (async () => {
+              if (value?.type === "user" && props.setPrompt) {
+                props.setPrompt({
+                  ...(await restoredPromptInput(value, client.media.read)),
+                  pasted: [],
+                })
+              }
+              await client.api.session.revert.stage({ sessionID: props.sessionID, messageID: props.messageID })
+            })().catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
             dialog.clear()
           },
         },
