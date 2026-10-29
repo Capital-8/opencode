@@ -1209,10 +1209,12 @@ function bashAppend(text: BashText, value: string) {
 function bashEvaluatesExpansion(text: BashText, evaluation: BashEvaluation, context: BashContext) {
   const combined = `${text.literal} ${text.output}`
   const hasExpansion = BASH_EXPANSION_RE.test(combined)
-  const hasEscape = BASH_ESCAPE_RE.test(text.literal)
+  // Escapes reach the value through $'...' or a substitution's printf, echo -e, or tr.
+  const hasEscape = BASH_ESCAPE_RE.test(combined)
   if (hasExpansion || hasEscape || /[$`]/.test(text.literal)) context.boundDollar = true
   if (hasExpansion || hasEscape || /[({`]/.test(text.literal)) context.boundOpen = true
-  if (hasEscape || combined.includes("[")) context.boundBracket = true
+  // A substitution's output can hold `[` that the script never spells (printf '\x5b', tr, base64 -d).
+  if (hasExpansion || hasEscape || text.output.trim() || combined.includes("[")) context.boundBracket = true
   if (evaluation === "deferred") return false
   if (text.word.includes("[") || combined.includes("[")) context.sinkBracket = true
   if (

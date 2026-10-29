@@ -62,7 +62,7 @@ describe("native shell syntax compatibility", () => {
       "((count++))",
       "for ((i=0; i<2; i++)); do printf ok; done",
       "echo `printf \\2`",
-      "F='$HOME/bin'; SIZE=$(stat -f %z file); N=$(( (SIZE + 1023) / 1024 )); echo $N",
+      "F='$HOME/bin'; SIZE=4096; N=$(( (SIZE + 1023) / 1024 )); echo $N",
     ])(`${shell} extracts commands without rejecting ordinary syntax: %s`, async (command) => {
       const scanned = await Effect.runPromise(ShellParse.scan(command, shell, "/workspace"))
       expect(await Effect.runPromise(ShellParse.scanPortable(command, shell, "/workspace"))).toEqual(scanned)
@@ -164,6 +164,19 @@ describe("native shell syntax compatibility", () => {
         failure: { message: "Portable shell scanner cannot analyze command: dynamic-execution" },
       })
     }
+  })
+
+  test.each([
+    ["bash", "x=\"a$(printf '\\x5b')\\$(touch pwn)]\"; echo $((x))"],
+    ["bash", "x=$(printf 'a\\x5b\\x24\\x28touch pwn\\x29]'); echo $((x))"],
+    ["bash", "x=$(echo 'a{$(touch pwn)]' | tr '{' '\\133'); (( x ))"],
+    ["bash", "F='$HOME/bin'; SIZE=$(stat -f %z file); N=$(( (SIZE + 1023) / 1024 )); echo $N"],
+    ["zsh", "r=\"a$(printf '\\x5b')\\$(touch pwn)]\"; echo ${(P)r}"],
+  ])("%s rejects variable sinks when a substitution can build the subscript: %s", async (shell, command) => {
+    expect(await Effect.runPromise(Effect.result(ShellParse.scan(command, shell, "/workspace")))).toMatchObject({
+      _tag: "Failure",
+      failure: { message: "Portable shell scanner cannot analyze command: dynamic-execution" },
+    })
   })
 
   test.each([
