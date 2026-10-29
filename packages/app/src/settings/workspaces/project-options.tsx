@@ -18,6 +18,7 @@ export const ProjectOptions: Component<{
   onOpenChange?: (open: boolean) => void
   onEdit?: () => void
   onRename?: () => void
+  onAdd?: () => void
   class?: string
   size?: "small" | "normal" | "large"
 }> = (props) => {
@@ -26,8 +27,6 @@ export const ProjectOptions: Component<{
   const platform = usePlatform()
   const revealProject = useRevealProject()
   const context = () => global.ensureServerCtx(props.server)
-
-  let trigger: HTMLButtonElement | undefined
 
   const directories = () => [props.project.worktree, ...(props.project.sandboxes ?? [])]
 
@@ -44,20 +43,13 @@ export const ProjectOptions: Component<{
   }
 
   const addProject = () => {
-    const directory = props.project.worktree
-    const root = trigger?.closest(".settings-panel")
-    context().projects.touch(directory)
-    requestAnimationFrame(() => {
-      Array.from(root?.querySelectorAll<HTMLButtonElement>("button[title]") ?? [])
-        .find((button) => button.title === directory)
-        ?.focus()
-    })
+    props.onAdd?.()
+    context().projects.touch(props.project.worktree)
   }
 
   return (
     <Menu gutter={4} modal={false} placement="bottom-end" open={props.open} onOpenChange={props.onOpenChange}>
       <Menu.Trigger
-        ref={trigger}
         as={IconButton}
         variant="ghost-muted"
         size={props.size ?? "small"}

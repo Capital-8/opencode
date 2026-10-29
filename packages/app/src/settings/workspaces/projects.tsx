@@ -30,6 +30,8 @@ export const SettingsProjects: Component<{
   const [store, setStore] = createStore({ filter: "", others: false })
   const context = createMemo(() => global.ensureServerCtx(props.server))
 
+  let focus: string | undefined
+
   const projects = createMemo(() => context().projects.unique())
   const used = createMemo(
     () =>
@@ -143,7 +145,16 @@ export const SettingsProjects: Component<{
               <div role="list" class="settings-project-list">
                 <Key each={added()} by="worktree">
                   {(project) => (
-                    <SettingsProjectRow project={project()} server={props.server} onOpen={props.onOpenProject} />
+                    <SettingsProjectRow
+                      project={project()}
+                      server={props.server}
+                      onOpen={props.onOpenProject}
+                      onMount={(button) => {
+                        if (focus !== project().worktree) return
+                        focus = undefined
+                        requestAnimationFrame(() => button.focus())
+                      }}
+                    />
                   )}
                 </Key>
               </div>
@@ -179,7 +190,12 @@ export const SettingsProjects: Component<{
                 <div role="list" class="settings-project-list">
                   <Key each={otherResults()} by="worktree">
                     {(project) => (
-                      <SettingsProjectRow project={project()} server={props.server} onOpen={props.onOpenProject} />
+                      <SettingsProjectRow
+                        project={project()}
+                        server={props.server}
+                        onOpen={props.onOpenProject}
+                        onAdd={() => (focus = project().worktree)}
+                      />
                     )}
                   </Key>
                 </div>
