@@ -22,9 +22,11 @@ export function SettingsProjectRow(props: {
   const language = useLanguage()
   const global = useGlobal()
 
-  const [store, setStore] = createStore({
+  const [store, setStore] = createStore<{
+    menu: boolean
+    editor?: { draft: string; saving: boolean }
+  }>({
     menu: false,
-    editor: undefined as { draft: string; saving: boolean } | undefined,
   })
 
   let button: HTMLButtonElement | undefined

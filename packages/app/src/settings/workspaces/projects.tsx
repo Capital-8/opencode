@@ -33,6 +33,7 @@ export const SettingsProjects: Component<{
   let focus: string | undefined
 
   const projects = createMemo(() => context().projects.unique())
+
   const used = createMemo(
     () =>
       new Set(

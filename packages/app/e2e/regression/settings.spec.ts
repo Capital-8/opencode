@@ -367,10 +367,12 @@ test("project list menus rename, edit, add, and stay inside the scrollport", asy
   await expect(panel.getByRole("listitem")).toHaveCount(1)
   await others.click()
   await expect(panel.getByRole("listitem")).toHaveCount(4)
+
   const addTrigger = panel
     .getByRole("listitem")
     .filter({ hasText: "dinocms" })
     .getByRole("button", { name: "More options", exact: true })
+
   await addTrigger.focus()
   await addTrigger.press("Enter")
   const menu = page.getByRole("menu")
