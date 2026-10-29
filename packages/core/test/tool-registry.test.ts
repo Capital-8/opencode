@@ -1229,7 +1229,6 @@ describe("Tool", () => {
       expect(progress).toEqual([
         { toolCalls: [{ tool: "echo", status: "running", input: { text: "request" } }] },
         { stage: "old" },
-        { toolCalls: [{ tool: "echo", status: "completed", input: { text: "request" } }] },
       ])
     }),
   )
