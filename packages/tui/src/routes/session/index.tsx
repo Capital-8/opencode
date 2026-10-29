@@ -68,7 +68,6 @@ import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { TodoItem } from "../../component/todo-item"
 import { DialogImagePreview } from "../../component/dialog-image-preview"
-import { takeDraft } from "../../component/prompt/draft-stash"
 import { createMediaSource } from "../../component/media-source"
 import { statusLabel } from "../../component/dialog-workspace-file-changes"
 import { DialogMessage } from "./dialog-message"
@@ -84,7 +83,7 @@ import { errorMessage } from "../../util/error"
 import { useToast } from "../../ui/toast"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
-import { restoredPromptInput } from "../../prompt/codec"
+import { usePromptRestore } from "../../prompt/restore"
 import { appendPrompt } from "../../prompt/history"
 import { deduplicateVisibleImages } from "../../prompt/attachment"
 import { useEpilogue } from "../../context/epilogue"
@@ -264,6 +263,7 @@ export function Session(props: {
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(config))
   const toast = useToast()
+  const restorePrompt = usePromptRestore()
   const client = useClient()
   const autoApproved = new Set<string>()
   createEffect(() => {
@@ -667,13 +667,14 @@ export function Session(props: {
       if (!empty(prompt())) return
       const list = messages()
       const end = list.findIndex((item) => item.id === event.data.assistantMessageID)
-      const earlier = end < 0 ? [] : list.slice(0, end).toReversed()
-      const stop = earlier.findIndex((item) => item.type === "shell" || item.type === "idle")
-      const recalled = (stop < 0 ? earlier : earlier.slice(0, stop)).find(
-        (item): item is SessionMessageUser => item.type === "user" && !data.session.input.has(route.sessionID, item.id),
-      )
+      let recalled: SessionMessageUser | undefined
+      for (let i = end - 1; i >= 0 && !recalled; i--) {
+        const item = list[i]
+        if (!item || item.type === "shell" || item.type === "idle") break
+        if (item.type === "user" && !data.session.input.has(route.sessionID, item.id)) recalled = item
+      }
       const restored = recalled
-        ? await restoredPromptInput(recalled, client.media.read).catch((error) => {
+        ? await restorePrompt(recalled).catch((error) => {
             toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
             return null
           })
@@ -682,7 +683,7 @@ export function Session(props: {
       if (restored === null || sessionDisposed || route.sessionID !== event.data.sessionID) return
       const current = prompt()
       if (!empty(current) || current.mode !== "normal") return
-      if (restored) current.set({ ...restored, pasted: [] })
+      if (restored) current.set(restored)
       if (type === "provider.go-limit" || dialog.stack.length > 0) return
       if (goUpsell.dontShow || goUpsellMemory.dontShow) return
       const now = Date.now()
@@ -821,13 +822,11 @@ export function Session(props: {
               }
               // The cancel sweeps blobs nothing else references, so media refs load into the draft first.
               void runPendingAction(queued.id, async () => {
-                const restored = await restoredPromptInput(queued.payload, client.media.read)
+                const restored = await restorePrompt(queued.payload)
                 if (!(await requestPending("cancel", queued.id, "undo"))) return
                 const live = sessionPrompt() ?? target
-                // Once the tab is gone its composer text sits in the draft stash, so the prompt joins that.
-                const base = sessionDisposed ? (takeDraft(sessionID)?.prompt ?? live.current) : live.current
-                if (!sessionDisposed) live.setMode("normal")
-                live.set(appendPrompt(base, { ...restored, pasted: [] }, renderer.widthMethod))
+                live.setMode("normal")
+                live.set(appendPrompt(live.current, restored, renderer.widthMethod))
                 if (sessionDisposed) return
                 dialog.clear()
                 live.focus()
@@ -1140,7 +1139,7 @@ export function Session(props: {
         }
         const pending = pendingDeliveries().has(message.id)
         const undo = async () => {
-          const restored = await restoredPromptInput(message, client.media.read)
+          const restored = await restorePrompt(message)
           if (pending) {
             if (!(await requestPending("cancel", message.id))) return
           } else {
@@ -1148,10 +1147,7 @@ export function Session(props: {
             await client.api.experimental.session.wait({ sessionID })
             await client.api.session.revert.stage({ sessionID, messageID: message.id })
           }
-          sessionPrompt()?.set({
-            ...restored,
-            pasted: [],
-          })
+          sessionPrompt()?.set(restored)
         }
         void (pending ? runPendingAction(message.id, undo) : undo()).catch((error) =>
           toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }),

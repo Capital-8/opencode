@@ -5,7 +5,7 @@ import type { Types } from "effect"
 
 export type EditablePromptInput = Types.DeepMutable<PromptInput.Prompt>
 
-type ProjectedPrompt = Pick<Prompt, "text" | "agents"> & {
+export type ProjectedPrompt = Pick<Prompt, "text" | "agents"> & {
   readonly files?: ReadonlyArray<PromptAttachment>
   readonly skills?: ReadonlyArray<{ readonly id: string; readonly mention?: PromptInput.SkillAttachment["mention"] }>
 }
@@ -39,20 +39,23 @@ export function projectedPromptInput(input: ProjectedPrompt): EditablePromptInpu
 /**
  * {@link projectedPromptInput} with every `media:<hash>` file read back into a `data:` URI, for putting a sent prompt
  * back in the composer. The draft then keeps its bytes after the server releases the blob (an inbox cancel or a revert
- * sweeps blobs nothing references), and the composer previews and resends it like any pasted image.
+ * sweeps blobs nothing references), and the composer previews and resends it like any pasted image. A read that
+ * resolves `undefined` leaves its file out.
  */
 export async function restoredPromptInput(
   input: ProjectedPrompt,
-  read: (uri: string) => Promise<Uint8Array>,
+  read: (uri: string) => Promise<Uint8Array | undefined>,
 ): Promise<EditablePromptInput> {
   const output = projectedPromptInput(input)
   if (!output.files?.some((file) => mediaHashFromUri(file.uri))) return output
   const files = await Promise.all(
     output.files.map(async (file, index) => {
-      if (!mediaHashFromUri(file.uri)) return file
+      if (!mediaHashFromUri(file.uri)) return [file]
+      const bytes = await read(file.uri)
+      if (!bytes) return []
       const mime = input.files?.[index]?.mime ?? "application/octet-stream"
-      return { ...file, uri: `data:${mime};base64,${Buffer.from(await read(file.uri)).toString("base64")}` }
+      return [{ ...file, uri: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}` }]
     }),
   )
-  return { ...output, files }
+  return { ...output, files: files.flat() }
 }

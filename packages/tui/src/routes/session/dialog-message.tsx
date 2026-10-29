@@ -7,7 +7,7 @@ import { useClient } from "../../context/client"
 import { errorMessage } from "../../util/error"
 import { DialogFork } from "./dialog-fork"
 import type { PromptInfo } from "../../prompt/history"
-import { restoredPromptInput } from "../../prompt/codec"
+import { usePromptRestore } from "../../prompt/restore"
 import { useNewDesigns } from "../../config"
 
 export function DialogMessage(props: {
@@ -19,6 +19,7 @@ export function DialogMessage(props: {
   const clipboard = useClipboard()
   const toast = useToast()
   const client = useClient()
+  const restorePrompt = usePromptRestore()
   const newDesigns = useNewDesigns()
   const message = createMemo(() => data.session.message.get(props.sessionID, props.messageID))
 
@@ -42,10 +43,9 @@ export function DialogMessage(props: {
             const setPrompt = props.setPrompt
             // The composer changes only once the revert is staged, so a failed revert leaves the draft alone.
             void (async () => {
-              const restored =
-                value?.type === "user" && setPrompt ? await restoredPromptInput(value, client.media.read) : undefined
+              const restored = value?.type === "user" && setPrompt ? await restorePrompt(value) : undefined
               await client.api.session.revert.stage({ sessionID: props.sessionID, messageID: props.messageID })
-              if (restored) setPrompt?.({ ...restored, pasted: [] })
+              if (restored) setPrompt?.(restored)
             })().catch((error) => toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }))
             dialog.clear()
           },

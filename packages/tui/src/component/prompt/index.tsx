@@ -693,6 +693,7 @@ export function Prompt(props: PromptProps) {
     set(prompt) {
       // An async undo or revert can finish after its tab closed; its prompt waits in the tab's draft instead.
       if (disposed || input.isDestroyed) {
+        setStore("prompt", prompt)
         saveDraft(stashSessionID, { prompt, cursor: Infinity })
         return
       }

@@ -36,3 +36,8 @@ export function createMediaCache(
     },
   }
 }
+
+/** The server answered that the blob is gone (404), as opposed to a failure where it may still exist. */
+export function isMissingMedia(error: unknown) {
+  return error instanceof Error && error.name === "FileNotFoundError"
+}

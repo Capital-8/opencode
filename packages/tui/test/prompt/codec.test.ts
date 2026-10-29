@@ -126,4 +126,11 @@ describe("restored prompt input", () => {
   test("rejects when a media ref cannot be read, so callers keep the server copy", async () => {
     await expect(restoredPromptInput(message, () => Promise.reject(new Error("offline")))).rejects.toThrow("offline")
   })
+
+  test("leaves out a file whose read resolves undefined", async () => {
+    const output = await restoredPromptInput(message, async () => undefined)
+
+    expect(output.text).toBe(message.text)
+    expect(output.files?.map((file) => file.uri)).toEqual(["data:image/jpeg;base64,YWJj"])
+  })
 })
