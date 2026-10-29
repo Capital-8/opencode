@@ -21,7 +21,7 @@ export function saveDraft(sessionID: string | undefined, entry: DraftEntry) {
 
 const composers = new Map<string | undefined, PromptRef>()
 
-/** Marks a tab's mounted composer as the one {@link restoreToTab} writes to; returns its unregister. */
+/** Marks a tab's mounted composer as the one {@link appendToSessionPrompt} writes to; returns its unregister. */
 export function registerComposer(sessionID: string | undefined, composer: PromptRef) {
   composers.set(sessionID, composer)
   return () => {
@@ -30,11 +30,11 @@ export function registerComposer(sessionID: string | undefined, composer: Prompt
 }
 
 /**
- * Adds a prompt that comes back after an await (an undo or revert) to its tab, after anything already typed there: in
- * the tab's composer if one is mounted, else in its stashed draft. A session view remounts with its tab, so the
- * composer it started with may be gone by then. Returns the composer it wrote to.
+ * Appends a prompt that comes back after an await (an undo or revert) to a session's composer if one is mounted, else
+ * to its stashed draft, after anything already typed there. A session view remounts with its tab, so the composer it
+ * started with may be gone by then. Returns the composer it wrote to.
  */
-export function restoreToTab(sessionID: string, prompt: PromptInfo, widthMethod: WidthMethod) {
+export function appendToSessionPrompt(sessionID: string, prompt: PromptInfo, widthMethod: WidthMethod) {
   const composer = composers.get(sessionID)
   if (!composer) {
     const draft = takeDraft(sessionID)?.prompt

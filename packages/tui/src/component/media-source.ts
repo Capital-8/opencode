@@ -4,7 +4,8 @@ import { ClientContext } from "../context/client"
 
 /**
  * An `<image>` source for a URI that may be a `media:<hash>` ref. A ref reads its bytes from the server once something
- * shows it, so images nobody looks at fetch nothing; other URIs pass through.
+ * shows it, so images nobody looks at fetch nothing; other URIs pass through. `failed` covers a failed read and, through
+ * `onError`, a failed decode, until the URI changes.
  */
 export function createMediaSource(uri: Accessor<string>) {
   // Optional: image dialogs also render outside a connected client, where only plain URIs can load.
@@ -37,5 +38,6 @@ export function createMediaSource(uri: Accessor<string>) {
   return {
     source: (): string | Uint8Array | undefined => (mediaHashFromUri(uri()) ? bytes() : uri()),
     failed,
+    onError: () => setFailed(true),
   }
 }

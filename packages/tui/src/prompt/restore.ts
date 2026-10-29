@@ -5,18 +5,20 @@ import { restoredPromptInput, type ProjectedPrompt } from "./codec"
 import type { PromptInfo } from "./history"
 
 /**
- * Reads a sent prompt back for the composer before an undo or revert lets the server sweep its images. An image the
- * server no longer has is left out with a warning, so it can't block the rewind; any other failed read rejects, since
- * that image may still exist and the rewind could delete it.
+ * Reads a sent prompt back for the composer, with its images as bytes. Reading before an undo or revert means a failed
+ * read changes nothing, and the draft owns its bytes before the server releases the blob: an inbox
+ * cancel releases it at once, a revert once it's committed on the next submit. An image the server no longer has is
+ * left out with a warning, so it can't block the rewind; `allowMissing: false` rejects instead, as a fork without its
+ * prompt is not what was asked for. Any other failed read rejects, since that image may still exist.
  */
 export function usePromptRestore() {
   const client = useClient()
   const toast = useToast()
-  return async (input: ProjectedPrompt): Promise<PromptInfo> => {
+  return async (input: ProjectedPrompt, options?: { allowMissing?: false }): Promise<PromptInfo> => {
     let missing = 0
     const prompt = await restoredPromptInput(input, (uri) =>
       client.media.read(uri).catch((error) => {
-        if (!isMissingMedia(error)) throw error
+        if (options?.allowMissing === false || !isMissingMedia(error)) throw error
         missing++
         return undefined
       }),

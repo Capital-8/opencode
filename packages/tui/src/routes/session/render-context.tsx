@@ -6,7 +6,6 @@ import type { useConfig } from "../../config"
 import type { ThinkingMode } from "../../context/thinking"
 import type { createTimelineAnchors } from "./anchors"
 import type { GroupKind } from "./grouping/session"
-import type { PromptInfo } from "../../prompt/history"
 
 export type PendingAction = "steer" | "queue" | "cancel"
 
@@ -35,8 +34,6 @@ export const context = createContext<{
   legacyTurns: () => boolean
   config: ReturnType<typeof useConfig>["data"]
   mutatePending: (action: PendingAction, inboxID: string) => Promise<boolean>
-  /** Puts a prompt in this session's composer, or its draft once the tab has closed. */
-  setPrompt?: (prompt: PromptInfo) => void
   pendingDelivery: (inboxID: string) => SessionInbox.Delivery | undefined
 }>()
 

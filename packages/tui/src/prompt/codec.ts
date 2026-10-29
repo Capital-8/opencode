@@ -38,9 +38,9 @@ export function projectedPromptInput(input: ProjectedPrompt): EditablePromptInpu
 
 /**
  * {@link projectedPromptInput} with every `media:<hash>` file read back into a `data:` URI, for putting a sent prompt
- * back in the composer. The draft then keeps its bytes after the server releases the blob (an inbox cancel or a revert
- * sweeps blobs nothing references), and the composer previews and resends it like any pasted image. A read that
- * resolves `undefined` leaves its file out.
+ * back in the composer. The draft then keeps its bytes after the server releases the blob (an inbox cancel, or a
+ * committed revert), and the composer previews and resends it like any pasted image. A read that resolves `undefined`
+ * leaves its file out.
  */
 export async function restoredPromptInput(
   input: ProjectedPrompt,
