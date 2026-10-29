@@ -45,6 +45,12 @@ const messages = [
     time: { created: 1 },
   },
 ]
+// What forking from msg_shot opens: its own transcript, with a different prompt to undo.
+const forked = { ...session, id: "ses_forked", title: "Forked" }
+const forkedMessages = [
+  { ...messages[0], id: "msg_forked_reply" },
+  { ...messages[1], id: "msg_forked_ask", text: "Forked ask [Image 1]" },
+]
 const queuedShot = {
   id: "msg_queued",
   sessionID: session.id,
@@ -59,6 +65,7 @@ const MEDIA = `GET /api/experimental/media/${hash}`
 const REVERT = `POST /api/session/${session.id}/revert/stage`
 const CANCEL = `DELETE /api/session/${session.id}/inbox/msg_queued`
 const FORK = `POST /api/session/${session.id}/fork`
+const FORKED_REVERT = `POST /api/session/${forked.id}/revert/stage`
 
 type Respond = () => Response | Promise<Response>
 const image: Respond = () => new Response(png, { headers: { "content-type": "image/png" } })
@@ -71,13 +78,15 @@ const unavailable: Respond = () => new Response("unavailable", { status: 503 })
 async function openSession(server: { inbox?: unknown[]; plugins?: string[]; respond?: Record<string, Respond> }) {
   // Drafts are stashed per session for the whole process, so an earlier test's undo would prefill this composer.
   takeDraft(session.id)
+  takeDraft(forked.id)
   const calls: string[] = []
   const capabilities = new Map<string, string | null>()
   const logged: Partial<Record<string, Respond>> = {
     [MEDIA]: image,
     [REVERT]: () => json({ data: session }),
     [CANCEL]: () => new Response(null, { status: 204 }),
-    [FORK]: () => json({ data: { ...session, id: "ses_forked" } }),
+    [FORK]: () => json({ data: forked }),
+    [FORKED_REVERT]: () => json({ data: forked }),
     ...server.respond,
   }
   const setup = await createAppFixture({
@@ -87,16 +96,17 @@ async function openSession(server: { inbox?: unknown[]; plugins?: string[]; resp
     args: { sessionID: session.id },
     fetch: async (url, request) => {
       const key = `${request.method} ${url.pathname}`
-      if (url.pathname.endsWith("/message")) {
+      const [, id, rest] = /^\/api\/(?:experimental\/)?session\/([^/]+)(.*)$/.exec(url.pathname) ?? []
+      const info = [session, forked].find((item) => item.id === id)
+      if (rest === "/message") {
         capabilities.set(url.pathname, request.headers.get("x-opencode-capabilities"))
-        return json({ data: url.pathname.includes(session.id) ? messages : [], cursor: {} })
+        return json({ data: id === session.id ? messages : id === forked.id ? forkedMessages : [], cursor: {} })
       }
       if (url.pathname === "/api/session") return json({ data: [session], cursor: {} })
-      if (url.pathname === `/api/session/${session.id}`) return json({ data: session })
-      if (url.pathname === `/api/session/${session.id}/inbox`) return json({ data: server.inbox ?? [] })
-      if (url.pathname === `/api/session/${session.id}/permission`) return json({ data: [] })
-      if (url.pathname === `/api/session/${session.id}/interrupt`) return json({ data: session })
-      if (url.pathname === `/api/experimental/session/${session.id}/wait`) return new Response(null, { status: 204 })
+      if (info && (rest === "" || rest === "/interrupt")) return json({ data: info })
+      if (info && rest === "/inbox") return json({ data: id === session.id ? (server.inbox ?? []) : [] })
+      if (info && rest === "/permission") return json({ data: [] })
+      if (info && rest === "/wait") return new Response(null, { status: 204 })
       const respond = logged[key]
       if (!respond) return undefined
       // Logged on arrival, so a test can act while a read is still waiting; the status is added once it answers.
@@ -315,3 +325,23 @@ for (const queued of [false, true]) {
     expect(draft?.files?.map((file) => file.uri)).toEqual([pngURI])
   }, 30000)
 }
+
+test("an undo in a session opened with a seeded prompt, such as a fork, lands in its composer", async () => {
+  const result = await (async () => {
+    await using app = await openSession({})
+    await messageAction(app, "Fork")
+    // The fork opens with the forked-from prompt already in its composer.
+    await app.waitForFrame((frame) => frame.includes("Forked ask") && frame.includes("What is in [Image 1]"))
+    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("u")
+    // Once in the transcript and once more in the composer, after the seeded prompt.
+    const frame = await settled(app, (frame) => frame.split("Forked ask").length - 1 === 2)
+    return { calls: app.calls, frame }
+  })()
+  const draft = takeDraft(forked.id)?.prompt
+
+  expect(result.calls).toEqual([`${MEDIA} 200`, `${FORK} 200`, `${FORKED_REVERT} 200`])
+  expect(result.frame).toContain("What is in [Image 1]")
+  expect(draft?.text).toBe("What is in [Image 1]\n\nForked ask [Image 1]")
+  expect(draft?.files?.map((file) => file.uri)).toEqual([pngURI, pngURI])
+}, 30000)

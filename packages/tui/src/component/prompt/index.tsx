@@ -717,6 +717,7 @@ export function Prompt(props: PromptProps) {
   const stashSessionID = props.sessionID
 
   onMount(() => {
+    onCleanup(registerComposer(stashSessionID, ref))
     const saved = takeDraft(stashSessionID)
     if (store.prompt.text) return
     if (saved && saved.prompt.text) {
@@ -725,7 +726,6 @@ export function Prompt(props: PromptProps) {
       restoreExtmarksFromPrompt(saved.prompt)
       input.cursorOffset = Math.min(saved.cursor, measure(saved.prompt.text))
     }
-    onCleanup(registerComposer(stashSessionID, ref))
   })
 
   onCleanup(() => {
