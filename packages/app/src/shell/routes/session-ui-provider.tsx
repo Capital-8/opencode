@@ -140,6 +140,8 @@ export function SessionUIProvider(
         agents={settings.visibility.customAgents()}
         shellRunning={(id) => !!data.shell.get(id)}
         shellOutput={(input) => serverSDK.api.shell.output(input)}
+        readMedia={(uri, mime, signal) => serverSDK.media.load(uri, mime, signal)}
+        peekMedia={(uri, mime) => serverSDK.media.peek(uri, mime)}
         turnDiff={turnDiff()}
         onNavigateToSession={navigateToSession}
         onSessionHref={href}

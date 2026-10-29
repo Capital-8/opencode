@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { createRoot, createSignal } from "solid-js"
-import { createLinkCheck } from "../src/runtime/extension/link-check"
+import { createLinkCheck } from "../src/runtime/plugin/link-check"
 
 function setup(answer: (href: string) => boolean | Promise<boolean>) {
   return createRoot((dispose) => {
