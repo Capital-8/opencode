@@ -1,7 +1,7 @@
 import { createComputed, untrack, type Accessor } from "solid-js"
 
 /**
- * Asks whether a link's file exists only while its timeline is selected. Extensions check links for the selected
+ * Asks whether a link's file exists only while its timeline is selected. Plugins check links for the selected
  * session alone, so a hidden timeline's answer would be a false negative: a check asked while hidden, or one that
  * comes back negative after the timeline was hidden, even briefly, waits and asks again once it is selected.
  */

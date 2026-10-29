@@ -6,14 +6,17 @@ import {
   batch,
   createComponent,
   createComputed,
+  createEffect,
   createMemo,
   createRoot,
+  on,
   onCleanup,
   type Context,
   type JSX,
 } from "solid-js"
 import { createStore } from "solid-js/store"
 import { ServerScope, SessionRouteKey, SessionStateKey } from "../src/runtime/server/scope"
+import { createTimelineActions } from "../src/session/composer/timeline-actions"
 import { createTimelineCache } from "../src/session/timeline/cache"
 import { useWorkspaceLocation, WorkspaceLocationContext } from "../src/workspaces/location"
 
@@ -26,6 +29,7 @@ function setup() {
       deferred: boolean
       turnDiff: string
       messages: Partial<Record<string, SessionMessageInfo[]>>
+      parents: Partial<Record<string, string>>
     }>({
       id: "ses_a",
       directory: "/repo",
@@ -36,6 +40,7 @@ function setup() {
         ses_a: [{ id: "msg_a", type: "user", text: "First session", time: { created: 1 } }],
         ses_b: [{ id: "msg_b", type: "user", text: "Second session", time: { created: 2 } }],
       },
+      parents: {},
     })
 
     const views = new Map<
@@ -63,6 +68,10 @@ function setup() {
     }
 
     const turnDiffs: Record<string, string[]> = {}
+    // Views whose effects saw their transcript empty, as a subagent's view reloads its evicted parent.
+    const reloads: string[] = []
+    // The sessions each view's message actions read, and whether they were a child's.
+    const actions: Record<string, string[]> = {}
     let directoryReads = 0
 
     const imageReader = createMemo(() => {
@@ -139,6 +148,8 @@ function setup() {
       deferredReads,
       shells,
       turnDiffs,
+      reloads,
+      actions,
       directoryReads: () => directoryReads,
       dispose,
     }
@@ -167,7 +178,7 @@ function setup() {
               location: { directory: state.directory },
             })),
             parent: () => undefined,
-            parentID: () => undefined,
+            parentID: () => state.parents[state.id],
             status: () => ({ type: "idle" }),
           },
           history: { messages: () => state.messages[state.id] ?? [] },
@@ -214,6 +225,35 @@ function setup() {
           })
           createComputed(() => {
             shells[view] = [...(shells[view] ?? []), data.shellOutput === shellOutput]
+          })
+          createEffect(
+            on(
+              () => (state.messages[id] ?? []).length,
+              (count) => {
+                if (count === 0) reloads.push(id)
+              },
+              { defer: true },
+            ),
+          )
+
+          const timelineActions = createTimelineActions(
+            { sessionID: source.identity.sessionID, isChild: () => !!source.data.parentID() },
+            {
+              revert: () => {},
+              fork: () => {},
+              chooseModel: () => {},
+              openAttachment: () => {},
+              pending: {
+                status: (sessionID) => (sessionID === id ? "queued" : undefined),
+                queue: async () => {},
+                remove: async () => {},
+              },
+            },
+          )
+
+          createComputed(() => {
+            const status = timelineActions.pending?.status("msg")
+            actions[view] = [...(actions[view] ?? []), timelineActions.revert ? `root ${status}` : "child"]
           })
           views.set(id, { active, messages: source.history.messages, element })
           onCleanup(() => disposed.push(id))
@@ -278,6 +318,53 @@ test("disposes a detached view once its transcript is evicted, but never the sel
   }
 })
 
+test("a detached view goes before its effects can reload its evicted transcript", () => {
+  const input = setup()
+
+  try {
+    input.cache()
+    input.setState("id", "ses_b")
+    input.cache()
+    input.setState("messages", "ses_a", [])
+    expect(input.disposed).toEqual(["ses_a"])
+    expect(input.reloads).toEqual([])
+  } finally {
+    input.dispose()
+  }
+})
+
+test("a session moved to another Location replaces its view under the old one", () => {
+  const input = setup()
+
+  try {
+    const first = input.cache()
+    input.setState("directory", "/moved")
+    expect(input.cache()).not.toBe(first)
+    expect(input.disposed).toEqual(["ses_a"])
+  } finally {
+    input.dispose()
+  }
+})
+
+test("a detached view's message actions keep its own session while a child session is routed", () => {
+  const input = setup()
+
+  try {
+    input.cache()
+    input.setState({ id: "ses_child", parents: { ses_child: "ses_a" } })
+    input.cache()
+    input.setState("id", "ses_b")
+    input.cache()
+    expect(input.actions).toEqual({
+      "ses_a in /repo": ["root queued"],
+      "ses_child in /repo": ["child"],
+      "ses_b in /repo": ["root queued"],
+    })
+  } finally {
+    input.dispose()
+  }
+})
+
 test("suspends a detached mobile view and reuses it when the conversation returns", () => {
   const input = setup()
 
@@ -334,6 +421,7 @@ for (const order of ["session-first", "workspace-first"] as const) {
 for (const order of ["session-first", "workspace-first"] as const) {
   test(`keeps views live across five workspaces when updates are ${order}`, () => {
     const input = setup()
+    input.setState("directory", "/repo/ses_a")
     const render = createRoot((dispose) => ({ selected: createMemo(input.cache), dispose }))
 
     try {

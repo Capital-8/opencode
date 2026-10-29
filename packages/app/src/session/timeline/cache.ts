@@ -30,6 +30,10 @@ export function createTimelineCache(
   const data = useData()
   const markdown = useMarkdown()
 
+  // The key and directory of each session's view. A session moved to another directory gets a new key; its old view
+  // goes first, so the old view saves its scroll and disclosures before the new one reads them.
+  const keys = new Map<string, { key: string; directory?: string }>()
+
   const cache = createScopedCache(
     (key) =>
       createRoot((dispose) => {
@@ -49,15 +53,15 @@ export function createTimelineCache(
         }
 
         // Session retention evicts the transcripts of closed sessions. A detached view would still hold the old
-        // transcript and its DOM, so it goes too; reopening the session renders a new view.
+        // transcript and its DOM, so it goes too; reopening the session renders a new view. It goes in the same flush,
+        // before its effects run, so none of them reloads what was just evicted, such as a subagent's parent.
         createComputed(
           on(
             () => !!id && transcript(id).length === 0,
             (evicted, previous) => {
               if (!evicted || previous !== false || untrack(active)) return
-              queueMicrotask(() => {
-                if (!untrack(active) && cache.peek(key)?.dispose === dispose) cache.delete(key)
-              })
+
+              if (cache.peek(key)?.dispose === dispose) cache.delete(key)
             },
           ),
         )
@@ -157,12 +161,32 @@ export function createTimelineCache(
           dispose,
         }
       }, owner),
-    { maxEntries: 16, dispose: (entry) => entry.dispose() },
+    {
+      maxEntries: 16,
+      dispose: (entry, key) => {
+        entry.dispose()
+
+        for (const [id, value] of keys) if (value.key === key) keys.delete(id)
+      },
+    },
   )
 
   onCleanup(cache.clear)
 
-  return () => cache.get(session.identity.sessionKey()).value
+  return () => {
+    const key = session.identity.sessionKey()
+    const id = untrack(session.identity.sessionID)
+
+    if (id) {
+      const previous = keys.get(id)
+      const directory = untrack(session.data.info)?.location.directory
+
+      if (previous && previous.key !== key && previous.directory !== directory) cache.delete(previous.key)
+      keys.set(id, { key, directory })
+    }
+
+    return cache.get(key).value
+  }
 }
 
 // Untracked like a component: the provider keeps one view rather than rendering another when a read changes.

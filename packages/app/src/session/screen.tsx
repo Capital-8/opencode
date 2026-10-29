@@ -291,6 +291,11 @@ function SessionScreenContent(props: {
         return view.id === source.identity.sessionID() ? view : previous
       }, untrack(props.view))
 
+      const actions = composer.actions.timeline({
+        sessionID: source.identity.sessionID,
+        isChild: () => !!source.data.parentID(),
+      })
+
       return (
         <PluginLinks session={own()} active={active()}>
           <MessageTimeline
@@ -301,7 +306,7 @@ function SessionScreenContent(props: {
             view={own()}
             screen={props.screen}
             background={composer.requests.background}
-            actions={composer.actions.timeline}
+            actions={actions}
             scroll={timeline.scroll}
             onResumeScroll={timeline.actions.resume}
             setScrollRef={timeline.view.setScrollRef}
