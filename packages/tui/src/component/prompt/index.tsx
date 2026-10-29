@@ -31,7 +31,7 @@ import { expandPromptInputPastedText, realignPromptInputMentions } from "../../p
 import { parseSlashHead } from "../../prompt/parse"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
-import { saveDraft, takeDraft } from "./draft-stash"
+import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
@@ -691,12 +691,6 @@ export function Prompt(props: PromptProps) {
       setStore("mode", mode)
     },
     set(prompt) {
-      // An async undo or revert can finish after its tab closed; its prompt waits in the tab's draft instead.
-      if (disposed || input.isDestroyed) {
-        setStore("prompt", prompt)
-        saveDraft(stashSessionID, { prompt, cursor: Infinity })
-        return
-      }
       input.setText(prompt.text)
       setStore("prompt", prompt)
       restoreExtmarksFromPrompt(prompt)
@@ -731,6 +725,7 @@ export function Prompt(props: PromptProps) {
       restoreExtmarksFromPrompt(saved.prompt)
       input.cursorOffset = Math.min(saved.cursor, measure(saved.prompt.text))
     }
+    onCleanup(registerComposer(stashSessionID, ref))
   })
 
   onCleanup(() => {

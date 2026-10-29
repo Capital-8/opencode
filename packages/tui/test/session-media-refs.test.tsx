@@ -272,3 +272,46 @@ test("plugins read messages with inline bytes while the transcript reads media r
     "/api/session/ses_plugin_probe/message": null,
   })
 }, 20000)
+
+async function leaveAndReturn(app: App) {
+  // A leader key, since text in the composer would turn a slash command into more text.
+  app.mockInput.pressKey("x", { ctrl: true })
+  app.mockInput.pressKey("n")
+  await app.waitForFrame((frame) => !frame.includes("Looked at it"))
+  await app.mockInput.typeText("/sessions")
+  app.mockInput.pressEnter()
+  await app.waitForFrame((frame) => frame.includes("Sessions") && frame.includes("Media refs"))
+  app.mockInput.pressEnter()
+  await app.waitForFrame((frame) => frame.includes("Looked at it"))
+}
+
+for (const queued of [false, true]) {
+  const name = queued ? "a queued-prompt undo" : "an /undo"
+
+  test(`${name} that finishes after leaving and returning joins what was typed since`, async () => {
+    const media = Promise.withResolvers<void>()
+    const result = await (async () => {
+      await using app = await openSession({
+        inbox: queued ? [queuedShot] : [],
+        respond: { [MEDIA]: () => media.promise.then(image) },
+      })
+      if (queued) {
+        await undoQueued(app)
+        app.mockInput.pressEscape()
+      } else await undoLast(app)
+      await app.waitForFrame(() => app.calls.length > 0)
+      await leaveAndReturn(app)
+      await app.mockInput.typeText("typed note")
+      media.resolve()
+      await settled(app, () => app.calls.length > 1)
+      await leaveAndReturn(app)
+      return { calls: app.calls, frame: await app.waitForFrame((frame) => frame.includes("typed note")) }
+    })()
+    const draft = takeDraft(session.id)?.prompt
+
+    expect(result.calls).toEqual([`${MEDIA} 200`, queued ? `${CANCEL} 204` : `${REVERT} 200`])
+    expect(result.frame).toContain("typed note")
+    expect(draft?.text).toBe("typed note\n\nWhat is in [Image 1]")
+    expect(draft?.files?.map((file) => file.uri)).toEqual([pngURI])
+  }, 30000)
+}

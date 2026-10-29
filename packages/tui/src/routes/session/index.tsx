@@ -84,7 +84,7 @@ import { useToast } from "../../ui/toast"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
 import { usePromptRestore } from "../../prompt/restore"
-import { appendPrompt } from "../../prompt/history"
+import { restoreToTab } from "../../component/prompt/draft-stash"
 import { deduplicateVisibleImages } from "../../prompt/attachment"
 import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
@@ -389,13 +389,8 @@ export function Session(props: {
     saveScrollAnchor(true)
   })
   const [prompt, setPrompt] = createSignal<PromptRef>()
-  let lastPrompt: PromptRef | undefined
-  // For work that finishes after an await: the composer may have remounted, or unmounted with its tab, in which case
-  // its set() saves the tab's draft.
-  const sessionPrompt = () => prompt() ?? lastPrompt
   const bind = (r: PromptRef | undefined) => {
     setPrompt(r)
-    if (r) lastPrompt = r
     promptRef.set(r)
     if (seeded || !route.prompt || !r) return
     seeded = true
@@ -824,12 +819,10 @@ export function Session(props: {
               void runPendingAction(queued.id, async () => {
                 const restored = await restorePrompt(queued.payload)
                 if (!(await requestPending("cancel", queued.id, "undo"))) return
-                const live = sessionPrompt() ?? target
-                live.setMode("normal")
-                live.set(appendPrompt(live.current, restored, renderer.widthMethod))
+                const composer = restoreToTab(sessionID, restored, renderer.widthMethod)
                 if (sessionDisposed) return
                 dialog.clear()
-                live.focus()
+                composer?.focus()
               }).catch((error) =>
                 toast.show({
                   title: "Failed to undo pending prompt",
@@ -1077,7 +1070,7 @@ export function Session(props: {
           <DialogTimeline
             sessionID={route.sessionID}
             onMove={jumpToMessage}
-            setPrompt={(value) => sessionPrompt()?.set(value)}
+            setPrompt={(value) => restoreToTab(sessionID, value, renderer.widthMethod)}
           />
         ))
       },
@@ -1147,7 +1140,7 @@ export function Session(props: {
             await client.api.experimental.session.wait({ sessionID })
             await client.api.session.revert.stage({ sessionID, messageID: message.id })
           }
-          sessionPrompt()?.set(restored)
+          restoreToTab(sessionID, restored, renderer.widthMethod)
         }
         void (pending ? runPendingAction(message.id, undo) : undo()).catch((error) =>
           toast.show({ message: errorMessage(error), variant: "error", duration: 5000 }),
@@ -1525,7 +1518,7 @@ export function Session(props: {
         legacyTurns: legacy,
         config,
         mutatePending,
-        setPrompt: (value) => sessionPrompt()?.set(value),
+        setPrompt: (value) => restoreToTab(sessionID, value, renderer.widthMethod),
         pendingDelivery: (inboxID) => pendingDeliveries().get(inboxID),
       }}
     >
