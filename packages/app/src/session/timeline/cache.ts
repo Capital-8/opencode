@@ -125,6 +125,8 @@ export function createTimelineCache(
                 },
                 navigateToSession: data.navigateToSession,
                 sessionHref: data.sessionHref,
+                readMedia: data.readMedia,
+                peekMedia: data.peekMedia,
                 shellRunning: data.shellRunning,
                 // A hidden running shell stops polling its output and resumes from its cursor once selected.
                 get shellOutput() {
