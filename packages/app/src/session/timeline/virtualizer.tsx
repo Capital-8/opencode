@@ -33,9 +33,9 @@ import { holdLandingWidth } from "@/shell/panel-motion"
 
 const fallbackItemSize = 60
 
-// Reserved below the last row: a 36px lane for the live status row and its background hint, an 8px gap, then a 28px
+// Reserved below the last row: a 36px lane for the live status row and its background hint, an 8px gap, then a 32px
 // activity pill and its 10px composer gap. Both come and go inside it, so neither moves the rows above.
-const tailSize = 82
+const tailSize = 86
 
 const pendingMarkdown = '[data-component="markdown"]:not([data-markdown-ready])'
 
