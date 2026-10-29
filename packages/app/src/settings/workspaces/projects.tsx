@@ -16,6 +16,7 @@ import { SettingsSearchField } from "../search-field"
 import { SettingsProjectRow } from "./project-row"
 import "@/settings/search.css"
 import "@/settings/settings.css"
+import "./project.css"
 
 export const SettingsProjects: Component<{
   server: ServerConnection.Any
@@ -154,20 +155,25 @@ export const SettingsProjects: Component<{
                   <h3 class="text-13-medium text-v2-text-text-muted">{language.t("settings.projects.other")}</h3>
                 }
               >
-                <Button
-                  variant="ghost-muted"
-                  class="self-start"
+                <button
+                  type="button"
+                  class="settings-models-group-trigger project-settings-shared-trigger"
                   aria-label={language.t("settings.projects.other")}
                   aria-expanded={store.others}
                   onClick={() => setStore("others", (value) => !value)}
                 >
-                  <Icon
-                    name={store.others ? "chevron-down" : "chevron-right"}
-                    classList={{ "rtl:rotate-180": !store.others }}
-                  />
-                  {language.t("settings.projects.other")}
-                  <span class="text-v2-text-text-faint tabular-nums">{others().length}</span>
-                </Button>
+                  <span class="settings-models-group-chevron">
+                    <Icon
+                      name="fill-triangle-down"
+                      size="small"
+                      classList={{ "project-settings-shared-chevron": true, open: store.others }}
+                    />
+                  </span>
+                  <span class="project-settings-shared-label">
+                    <span class="settings-models-group-title">{language.t("settings.projects.other")}</span>
+                    <span class="project-settings-shared-count">{others().length}</span>
+                  </span>
+                </button>
               </Show>
               <Show when={store.others || query()}>
                 <div role="list" class="settings-project-list">
