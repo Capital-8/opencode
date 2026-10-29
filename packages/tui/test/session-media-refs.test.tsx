@@ -76,9 +76,9 @@ const unavailable: Respond = () => new Response("unavailable", { status: 503 })
 
 /** Opens the session against a fake server. `calls` logs media reads and rewinds as `<request> <status>`. */
 async function openSession(server: { inbox?: unknown[]; plugins?: string[]; respond?: Record<string, Respond> }) {
-  // Drafts are stashed per session for the whole process, so an earlier test's undo would prefill this composer.
-  takeDraft(session.id)
-  takeDraft(forked.id)
+  // Drafts are stashed per tab for the whole process, so an earlier test or test file would prefill a composer. A home
+  // draft would also turn the slash command typed there by `leaveAndReturn` into more text.
+  for (const id of [undefined, session.id, forked.id]) takeDraft(id)
   const calls: string[] = []
   const capabilities = new Map<string, string | null>()
   const logged: Partial<Record<string, Respond>> = {
