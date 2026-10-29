@@ -1,4 +1,4 @@
-import { Show, createEffect, createMemo, type Component, type JSX } from "solid-js"
+import { Show, createEffect, createMemo, on, type Component, type JSX } from "solid-js"
 import { Key } from "@solid-primitives/keyed"
 import { createStore } from "solid-js/store"
 import { Button } from "@opencode/ui/button"
@@ -26,20 +26,38 @@ export const SettingsProjects: Component<{
   const language = useLanguage()
   const global = useGlobal()
   const pickDirectory = useDirectoryPicker()
-  const [store, setStore] = createStore({ filter: "" })
+  const [store, setStore] = createStore({ filter: "", others: false })
   const context = createMemo(() => global.ensureServerCtx(props.server))
-  const projects = createMemo(() => context().projects.list())
-  const searchable = createMemo(() => projects().length > 7)
 
-  const filtered = createMemo(() => {
-    const query = searchable() ? store.filter.trim().toLowerCase() : ""
+  const projects = createMemo(() => context().projects.unique())
+  const used = createMemo(
+    () =>
+      new Set(
+        context()
+          .projects.used()
+          .map((project) => project.id),
+      ),
+  )
 
-    return query ? projects().filter((project) => displayName(project).toLowerCase().includes(query)) : projects()
-  })
+  const others = createMemo(() => projects().filter((project) => !used().has(project.id)))
+  const searchable = createMemo(() => projects().length > 7 || others().length > 0)
+  const query = createMemo(() => (searchable() ? store.filter.trim().toLowerCase() : ""))
+
+  const filtered = createMemo(() =>
+    projects().filter(
+      (project) =>
+        !query() || [displayName(project), project.worktree].some((value) => value.toLowerCase().includes(query())),
+    ),
+  )
+
+  const added = createMemo(() => filtered().filter((project) => used().has(project.id)))
+  const otherResults = createMemo(() => filtered().filter((project) => !used().has(project.id)))
 
   createEffect(() => {
     if (!searchable()) setStore("filter", "")
   })
+
+  createEffect(on(context, () => setStore("others", false)))
 
   const addProject = () =>
     pickDirectory({
@@ -108,9 +126,7 @@ export const SettingsProjects: Component<{
                 class="settings-project-empty-card flex flex-col items-center gap-2 py-24 text-center"
               >
                 <Icon name="folder" size="large" class="mb-2 text-v2-icon-icon-muted" />
-                <div class="text-13-medium text-v2-text-text-base">
-                  {language.t("settings.projects.empty.title")}
-                </div>
+                <div class="text-13-medium text-v2-text-text-base">{language.t("settings.projects.empty.title")}</div>
                 <div class="text-13-regular text-v2-text-text-muted">
                   {language.t("settings.projects.empty.description")}
                 </div>
@@ -121,12 +137,48 @@ export const SettingsProjects: Component<{
             </Show>
           }
         >
-          <div role="list" class="settings-project-list">
-            <Key each={filtered()} by="worktree">
-              {(project) => (
-                <SettingsProjectRow project={project()} server={props.server} onOpen={props.onOpenProject} />
-              )}
-            </Key>
+          <div class="flex flex-col gap-3">
+            <Show when={added().length > 0}>
+              <div role="list" class="settings-project-list">
+                <Key each={added()} by="worktree">
+                  {(project) => (
+                    <SettingsProjectRow project={project()} server={props.server} onOpen={props.onOpenProject} />
+                  )}
+                </Key>
+              </div>
+            </Show>
+            <Show when={otherResults().length > 0}>
+              <Show
+                when={!query()}
+                fallback={
+                  <h3 class="text-13-medium text-v2-text-text-muted">{language.t("settings.projects.other")}</h3>
+                }
+              >
+                <Button
+                  variant="ghost-muted"
+                  class="self-start"
+                  aria-label={language.t("settings.projects.other")}
+                  aria-expanded={store.others}
+                  onClick={() => setStore("others", (value) => !value)}
+                >
+                  <Icon
+                    name={store.others ? "chevron-down" : "chevron-right"}
+                    classList={{ "rtl:rotate-180": !store.others }}
+                  />
+                  {language.t("settings.projects.other")}
+                  <span class="text-v2-text-text-faint tabular-nums">{others().length}</span>
+                </Button>
+              </Show>
+              <Show when={store.others || query()}>
+                <div role="list" class="settings-project-list">
+                  <Key each={otherResults()} by="worktree">
+                    {(project) => (
+                      <SettingsProjectRow project={project()} server={props.server} onOpen={props.onOpenProject} />
+                    )}
+                  </Key>
+                </div>
+              </Show>
+            </Show>
           </div>
         </Show>
       </div>

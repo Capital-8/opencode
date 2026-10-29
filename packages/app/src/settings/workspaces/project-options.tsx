@@ -9,6 +9,7 @@ import { ServerConnection } from "@/runtime/server/registry"
 import type { LocalProject } from "@/shell/state/layout"
 import { fileManagerApp } from "@/home/projects/file-manager"
 import { useRevealProject } from "@/home/projects/reveal"
+import { pathKey } from "@/workspaces/path-key"
 
 export const ProjectOptions: Component<{
   server: ServerConnection.Any
@@ -26,7 +27,14 @@ export const ProjectOptions: Component<{
   const revealProject = useRevealProject()
   const context = () => global.ensureServerCtx(props.server)
 
+  let trigger: HTMLButtonElement | undefined
+
   const directories = () => [props.project.worktree, ...(props.project.sandboxes ?? [])]
+
+  const added = () =>
+    context()
+      .projects.used()
+      .some((project) => pathKey(project.worktree) === pathKey(props.project.worktree))
 
   const hasUnread = () => directories().some((directory) => context().notification.project.hasUnread(directory))
 
@@ -35,15 +43,21 @@ export const ProjectOptions: Component<{
     directories().forEach((directory) => notification.project.markViewed(directory))
   }
 
+  const addProject = () => {
+    const directory = props.project.worktree
+    const root = trigger?.closest(".settings-panel")
+    context().projects.touch(directory)
+    requestAnimationFrame(() => {
+      Array.from(root?.querySelectorAll<HTMLButtonElement>("button[title]") ?? [])
+        .find((button) => button.title === directory)
+        ?.focus()
+    })
+  }
+
   return (
-    <Menu
-      gutter={4}
-      modal={false}
-      placement="bottom-end"
-      open={props.open}
-      onOpenChange={props.onOpenChange}
-    >
+    <Menu gutter={4} modal={false} placement="bottom-end" open={props.open} onOpenChange={props.onOpenChange}>
       <Menu.Trigger
+        ref={trigger}
         as={IconButton}
         variant="ghost-muted"
         size={props.size ?? "small"}
@@ -53,6 +67,9 @@ export const ProjectOptions: Component<{
       />
       <Menu.Portal>
         <Menu.Content>
+          <Show when={!added()}>
+            <Menu.Item onSelect={addProject}>{language.t("home.project.add")}</Menu.Item>
+          </Show>
           <Show when={props.onEdit} keyed>
             {(edit) => <Menu.Item onSelect={edit}>{language.t("common.edit")}</Menu.Item>}
           </Show>
@@ -60,11 +77,15 @@ export const ProjectOptions: Component<{
             {(rename) => <Menu.Item onSelect={rename}>{language.t("common.rename")}</Menu.Item>}
           </Show>
           <Show when={revealProject.available(props.server)}>
-            <Menu.Item onSelect={() => revealProject.reveal(props.server, props.project)}>{language.t(fileManagerApp(platform.os ?? "unknown").actionLabel)}</Menu.Item>
+            <Menu.Item onSelect={() => revealProject.reveal(props.server, props.project)}>
+              {language.t(fileManagerApp(platform.os ?? "unknown").actionLabel)}
+            </Menu.Item>
           </Show>
-          <Menu.Item disabled={!hasUnread()} onSelect={clearNotifications}>
-            {language.t("sidebar.project.clearNotifications")}
-          </Menu.Item>
+          <Show when={added()}>
+            <Menu.Item disabled={!hasUnread()} onSelect={clearNotifications}>
+              {language.t("sidebar.project.clearNotifications")}
+            </Menu.Item>
+          </Show>
         </Menu.Content>
       </Menu.Portal>
     </Menu>
