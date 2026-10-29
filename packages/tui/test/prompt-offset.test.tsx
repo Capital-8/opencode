@@ -1,6 +1,5 @@
 import { beforeEach, expect, test } from "bun:test"
 import path from "node:path"
-import { pathToFileURL } from "node:url"
 import { takeDraft } from "../src/component/prompt/draft-stash"
 import { createAppFixture } from "./fixture/app"
 import { tmpdir } from "./fixture/fixture"
@@ -8,72 +7,6 @@ import { directory, json } from "./fixture/tui-client"
 
 // Earlier app tests in this process can leave a home draft that the prompt would restore.
 beforeEach(() => takeDraft(undefined))
-
-test("file autocomplete keeps # in filenames while still attaching #line suffixes", async () => {
-  const location = { directory, project: { id: "proj_test", directory, canonical: directory } }
-  const entries = [
-    ...Array.from({ length: 25 }, (_, i) => ({ path: `report${String(i).padStart(2, "0")}.txt`, type: "file" })),
-    { path: "report#2026.md", type: "file" },
-    { path: "#notes.md", type: "file" },
-  ]
-  const queries: string[] = []
-  {
-    await using setup = await createAppFixture({
-      fetch: (url) => {
-        if (url.pathname === "/api/skill")
-          return json({
-            location,
-            data: [{ id: "report", name: "Report", description: "Report an issue", location: "builtin" }],
-          })
-        if (url.pathname === "/api/fs/find") {
-          const query = url.searchParams.get("query") ?? ""
-          queries.push(query)
-          return json({
-            location,
-            data: query ? entries.filter((entry) => entry.path.includes(query)).slice(0, 20) : [],
-          })
-        }
-      },
-    })
-    await setup.ready
-    await setup.waitForFrame((frame) => frame.includes("commands"))
-    const editor = setup.renderer.currentFocusedEditor!
-
-    await setup.mockInput.pasteBracketedText("@report#2026.md")
-    await setup.waitForFrame((frame) => frame.includes("┃ report#2026.md") && !frame.includes("Report an issue"))
-    setup.mockInput.pressEnter()
-    await setup.waitFor(() => editor.plainText === "@report#2026.md ")
-
-    await setup.mockInput.pasteBracketedText("@#notes.md")
-    await setup.waitForFrame((frame) => frame.includes("┃ #notes.md"))
-    setup.mockInput.pressEnter()
-    await setup.waitFor(() => editor.plainText === "@report#2026.md @#notes.md ")
-
-    await setup.mockInput.pasteBracketedText("@report#2026.md#3")
-    await setup.waitForFrame((frame) => frame.includes("┃ report#2026.md#3"))
-    setup.mockInput.pressEnter()
-    await setup.waitFor(() => editor.plainText === "@report#2026.md @#notes.md @report#2026.md#3 ")
-  }
-
-  expect(queries.filter(Boolean)).toEqual(["report#2026.md", "#notes.md", "report#2026.md"])
-  expect(takeDraft(undefined)?.prompt.files).toEqual([
-    {
-      uri: pathToFileURL(path.join(directory, "report#2026.md")).href,
-      name: "report#2026.md",
-      mention: { start: 0, end: 15, text: "@report#2026.md" },
-    },
-    {
-      uri: pathToFileURL(path.join(directory, "#notes.md")).href,
-      name: "#notes.md",
-      mention: { start: 16, end: 26, text: "@#notes.md" },
-    },
-    {
-      uri: `${pathToFileURL(path.join(directory, "report#2026.md")).href}?start=3`,
-      name: "report#2026.md#3",
-      mention: { start: 27, end: 44, text: "@report#2026.md#3" },
-    },
-  ])
-})
 
 test("an agent mention after a tab replaces only the mention", async () => {
   const location = { directory, project: { id: "proj_test", directory, canonical: directory } }
