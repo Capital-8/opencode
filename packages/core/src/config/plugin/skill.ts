@@ -3,6 +3,7 @@ export * as ConfigSkillPlugin from "./skill.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import type { Entry } from "@opencode/schema/config"
 import { FSUtil } from "@opencode/util/fs-util"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { Hash } from "@opencode/util/hash"
 import path from "path"
@@ -39,6 +40,7 @@ export const Plugin = define({
     const global = yield* Global.Service
     const location = yield* Location.Service
     const watcher = yield* Watcher.Service
+    const flock = yield* EffectFlock.Service
     const client = yield* HttpClient.HttpClient
     // The Console reads the User-Agent to tell which OpenCode a member runs.
     const http = HttpClient.withScope(
@@ -46,10 +48,7 @@ export const Plugin = define({
         HttpClient.mapRequest(client, HttpClientRequest.setHeader("User-Agent", App.useragent(ctx.app))),
       ),
     )
-    const loaded: { entries: Entry[]; skills: Skill.Info[] } = {
-      entries: yield* config.entries(),
-      skills: [],
-    }
+    const loaded: { entries: Entry[]; skills: Skill.Info[] } = { entries: [], skills: [] }
     const watches = yield* FiberMap.make<string>()
     const changes = yield* PubSub.sliding<string>(1)
     const lock = Semaphore.makeUnsafe(1)
@@ -187,24 +186,20 @@ export const Plugin = define({
       const origin = document.origin
       const listed = document.library?.skills ?? []
       if (!origin || listed.length === 0) return []
-      const credential = yield* ctx.integration.connection.resolve(document.connection)
-      if (!credential || credential.type === "external")
-        return yield* Effect.fail(new Error(`${document.integrationID} is not connected`))
-      const orgID = credential.metadata?.orgID
       // Workspaces on one server can share skill slugs, so each connection and workspace keeps its own cache.
       const cache = path.resolve(
         global.cache,
         "skills",
-        Hash.fast(
-          [origin, IntegrationConnection.key(document.connection), typeof orgID === "string" ? orgID : ""].join("\n"),
-        ),
+        Hash.fast([origin, IntegrationConnection.key(document.connection), document.orgID ?? ""].join("\n")),
       )
+      // Only a download needs the credential, so cached skills cost no token refresh and survive a failed one.
+      const headers = yield* Effect.cached(credentialHeaders(document))
       const skills = yield* Effect.forEach(
         listed.filter((skill) => SkillDiscovery.isSafeSegment(skill.slug)),
         (skill) =>
           librarySkill({
             url: `${origin}/api/v2/library/skills/${encodeURIComponent(skill.slug)}`,
-            headers: ConsoleAccess.headers(credential),
+            headers,
             root: path.join(cache, skill.slug),
             slug: skill.slug,
             version: skill.version,
@@ -214,25 +209,50 @@ export const Plugin = define({
       return skills.filter((skill) => skill !== undefined)
     })
 
+    const credentialHeaders = Effect.fnUntraced(function* (document: ConfigIntegration.Document) {
+      const credential = yield* ctx.integration.connection.resolve(document.connection)
+      if (!credential || credential.type === "external")
+        return yield* Effect.fail(new Error(`${document.integrationID} is not connected`))
+      const orgID = credential.metadata?.orgID
+      // Another workspace's files must not land in this workspace's cache.
+      if ((typeof orgID === "string" ? orgID : undefined) !== document.orgID)
+        return yield* Effect.fail(new Error(`${document.integrationID} switched workspaces`))
+      return ConsoleAccess.headers(credential)
+    })
+
     // A version already on disk costs no request; a failed download keeps the cached version.
     const librarySkill = Effect.fnUntraced(function* (input: {
       url: string
-      headers: Record<string, string>
+      headers: Effect.Effect<Record<string, string>, unknown>
       root: string
       slug: string
       version: string
     }) {
       const file = path.join(input.root, "SKILL.md")
-      const current = yield* fs
-        .readFileStringSafe(path.join(input.root, ".opencode-version"))
-        .pipe(Effect.orElseSucceed(() => undefined))
-      if (current !== input.version || !(yield* fs.isFile(file)))
-        yield* download(input).pipe(
+      const read = (target: string) => fs.readFileStringSafe(target).pipe(Effect.orElseSucceed(() => undefined))
+      // Reading SKILL.md as the check means a concurrent swap can't leave this pass without it.
+      const cached = Effect.all([read(path.join(input.root, ".opencode-version")), read(file)]).pipe(
+        Effect.map(([version, content]) => (version === input.version ? content : undefined)),
+      )
+      const content =
+        (yield* cached) ??
+        (yield* Effect.gen(function* () {
+          // Locations and processes share the cache: one downloads while the others wait, then reuse its copy.
+          yield* flock.acquire(`console-skill:${input.root}`, undefined, { timeoutMs: 60_000 })
+          const current = yield* cached
+          if (current !== undefined) return current
+          yield* download(input)
+          return yield* read(file)
+        }).pipe(
+          Effect.scoped,
           Effect.catchCause((cause) =>
-            Effect.logWarning("failed to download Console skill", { slug: input.slug, version: input.version, cause }),
+            Effect.logWarning("failed to download Console skill", {
+              slug: input.slug,
+              version: input.version,
+              cause,
+            }).pipe(Effect.andThen(read(file))),
           ),
-        )
-      const content = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
+        ))
       if (!content) return undefined
       const parsed = SkillFile.parse(input.root, file, content)
       if (parsed._tag === "Parsed") return parsed.skill
@@ -246,16 +266,14 @@ export const Plugin = define({
 
     const download = Effect.fnUntraced(function* (input: {
       url: string
-      headers: Record<string, string>
+      headers: Effect.Effect<Record<string, string>, unknown>
       root: string
       slug: string
     }) {
+      const headers = yield* input.headers
       const bundle = yield* http
         .execute(
-          HttpClientRequest.get(input.url).pipe(
-            HttpClientRequest.acceptJson,
-            HttpClientRequest.setHeaders(input.headers),
-          ),
+          HttpClientRequest.get(input.url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers)),
         )
         .pipe(
           Effect.flatMap(HttpClientResponse.schemaBodyJson(Bundle)),
@@ -292,6 +310,7 @@ export const Plugin = define({
 
     const refresh = Effect.fn("ConfigSkillPlugin.refresh")(
       function* (file?: string) {
+        loaded.entries = yield* config.entries()
         yield* FiberMap.clear(watches)
         const skills = new Map<Skill.ID, Skill.Info>()
         const current = sources()
@@ -320,19 +339,14 @@ export const Plugin = define({
       Stream.runForEach((file) => refresh(file).pipe(Effect.andThen(ctx.skill.reload()))),
       Effect.forkScoped({ startImmediately: true }),
     )
+    // Subscribe before the first config read so an update in between still triggers a reload.
+    yield* ctx.event.subscribe({ types: ["config.updated"] }).pipe(
+      Stream.runForEach(() => refresh().pipe(Effect.andThen(ctx.skill.reload()))),
+      Effect.forkScoped({ startImmediately: true }),
+    )
     yield* refresh()
     yield* ctx.skill.transform((editor) => {
       for (const skill of loaded.skills) editor.add(skill)
     })
-    yield* ctx.event.subscribe({ types: ["config.updated"] }).pipe(
-      Stream.runForEach(() =>
-        config.entries().pipe(
-          Effect.tap((entries) => Effect.sync(() => (loaded.entries = entries))),
-          Effect.andThen(refresh()),
-          Effect.andThen(ctx.skill.reload()),
-        ),
-      ),
-      Effect.forkScoped({ startImmediately: true }),
-    )
   }),
 })

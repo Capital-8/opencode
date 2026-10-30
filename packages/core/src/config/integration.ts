@@ -70,6 +70,8 @@ export class Document extends Config.Document.extend<Document>("Config.Integrati
   organization: Schema.optional(Schema.String),
   /** Server behind the connection, without a trailing slash. The library's skill files download from it. */
   origin: Schema.optional(Schema.String),
+  /** Workspace the connection signed in to, which scopes the library's cached skills. */
+  orgID: Schema.optional(Schema.String),
   /** Library content the connection's workspace shares. It is not user config, so it stays out of `info`. */
   library: Schema.optional(Library),
 }) {}
@@ -101,6 +103,7 @@ export function make(input: {
   readonly connection: Connection.Info
   readonly organization?: string
   readonly origin?: string
+  readonly orgID?: string
   readonly info: Remote
 }) {
   const servers = input.info.mcp?.servers
@@ -110,6 +113,7 @@ export function make(input: {
     connection: input.connection,
     organization: input.organization,
     origin: input.origin,
+    orgID: input.orgID,
     library: input.info.library,
     info: new Config.Info({
       providers:

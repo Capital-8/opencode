@@ -16,6 +16,7 @@ import { Bus } from "@opencode/core/bus"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
 import { FSUtil } from "@opencode/util/fs-util"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Location } from "@opencode/core/location"
@@ -57,9 +58,10 @@ const startEntries = Effect.fnUntraced(function* (
     claude: [],
     agents: [],
   },
-  options: { readonly cache?: string; readonly host?: Parameters<typeof host>[0] } = {},
+  options: { readonly global?: Partial<Global.Interface>; readonly host?: Parameters<typeof host>[0] } = {},
 ) {
   const service = yield* Skill.Service
+  const global = Global.Service.of({ ...Global.make(), home, ...options.global })
   const pluginHost = host({
     ...options.host,
     skill: {
@@ -74,12 +76,12 @@ const startEntries = Effect.fnUntraced(function* (
   yield* ConfigSkillPlugin.Plugin.effect(pluginHost).pipe(
     Effect.provide(Config.testLayer(entries, compatibility)),
     Effect.provideService(SkillDiscovery.Service, discovery),
-    Effect.provideService(
-      Global.Service,
-      Global.Service.of({ ...Global.make(), home, ...(options.cache ? { cache: options.cache } : {}) }),
-    ),
+    Effect.provideService(Global.Service, global),
     Effect.provideService(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(directory) }))),
     Effect.provide(FetchHttpClient.layer),
+    Effect.provide(
+      AppNodeBuilder.build(EffectFlock.node, [Global.node.replace(Layer.succeed(Global.Service, global))]),
+    ),
   )
   return service
 })
@@ -88,7 +90,7 @@ const startEntries = Effect.fnUntraced(function* (
 const consoleServer = Effect.acquireRelease(
   Effect.sync(() => {
     const state = {
-      respond: (_request: Request): Response => new Response(null, { status: 404 }),
+      respond: (_request: Request): Response | Promise<Response> => new Response(null, { status: 404 }),
       requests: [] as { path: string; authorization: string | null; orgID: string | null; userAgent: string | null }[],
     }
     const server = Bun.serve({
@@ -119,22 +121,21 @@ const consoleDocument = (origin: string, skills: ConfigIntegration.Library["skil
     integrationID: Integration.ID.make("opencode"),
     connection: { type: "credential", id: Credential.ID.make("cred_console"), label: "Acme", method: "key" },
     origin,
+    orgID: "org_acme",
     info: { library: { skills } },
   })
 
-const consoleHost = (): Parameters<typeof host>[0] => {
+const consoleCredential = () =>
+  Effect.succeed(Credential.Key.make({ type: "key", key: "secret", metadata: { orgID: "org_acme" } }))
+
+const consoleHost = (
+  resolve: () => Effect.Effect<Credential.Value | undefined, unknown> = consoleCredential,
+): Parameters<typeof host>[0] => {
   const integration = host().integration
-  return {
-    integration: {
-      ...integration,
-      connection: {
-        ...integration.connection,
-        resolve: () =>
-          Effect.succeed(Credential.Key.make({ type: "key", key: "secret", metadata: { orgID: "org_acme" } })),
-      },
-    },
-  }
+  return { integration: { ...integration, connection: { ...integration.connection, resolve } } }
 }
+
+const consoleGlobal = (root: string) => ({ cache: path.join(root, "cache"), state: path.join(root, "state") })
 
 // Each call starts a fresh plugin and skill catalog over the same cache, as a new session would.
 const loadConsole = (input: {
@@ -143,6 +144,7 @@ const loadConsole = (input: {
   readonly skills: ConfigIntegration.Library["skills"]
   readonly entries?: Entry[]
   readonly compatibility?: { readonly claude: readonly AbsolutePath[]; readonly agents: readonly AbsolutePath[] }
+  readonly resolve?: () => Effect.Effect<Credential.Value | undefined, unknown>
 }) =>
   Effect.gen(function* () {
     const skill = yield* startEntries(
@@ -151,7 +153,7 @@ const loadConsole = (input: {
       input.root,
       emptyDiscovery,
       input.compatibility,
-      { cache: path.join(input.root, "cache"), host: consoleHost() },
+      { global: consoleGlobal(input.root), host: consoleHost(input.resolve) },
     )
     return yield* skill.list()
   }).pipe(Effect.scoped, Effect.provide(skillLayer))
@@ -636,7 +638,7 @@ describe("ConfigSkillPlugin.Plugin with Console Library skills", () => {
           ]
 
           const skill = yield* startEntries(entries, tmp.path, tmp.path, emptyDiscovery, undefined, {
-            cache: path.join(tmp.path, "cache"),
+            global: consoleGlobal(tmp.path),
             host: consoleHost(),
           })
           expect((yield* skill.list()).map((item) => item.id)).toEqual([Skill.ID.make("review")])
@@ -723,6 +725,118 @@ describe("ConfigSkillPlugin.Plugin with Console Library skills", () => {
 
           expect(console.state.requests).toHaveLength(2)
           expect(skills.map((item) => item.description)).toEqual(["First"])
+        }),
+      ),
+    ),
+  )
+
+  it.live("resolves the credential once per pass, and not at all for cached versions", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = (request) => {
+            const slug = path.basename(new URL(request.url).pathname)
+            return bundle(slug, "skl_1:1", { "SKILL.md": skillFile(slug, "Console") })
+          }
+          let resolves = 0
+          const load = loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [
+              { slug: "review", version: "skl_1:1" },
+              { slug: "deploy", version: "skl_1:1" },
+            ],
+            resolve: () => consoleCredential().pipe(Effect.tap(() => Effect.sync(() => resolves++))),
+          })
+
+          yield* load
+          expect(resolves).toBe(1)
+          expect((yield* load).map((item) => item.id).toSorted()).toEqual([
+            Skill.ID.make("deploy"),
+            Skill.ID.make("review"),
+          ])
+          expect(resolves).toBe(1)
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps cached skills when the credential can't be resolved", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "First") })
+          yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+          })
+          const failing = () => Effect.fail(new Error("token refresh failed"))
+
+          const hit = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+            resolve: failing,
+          })
+          const miss = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:2" }],
+            resolve: failing,
+          })
+
+          expect(hit.map((item) => item.description)).toEqual(["First"])
+          expect(miss.map((item) => item.description)).toEqual(["First"])
+          expect(console.state.requests).toHaveLength(1)
+        }),
+      ),
+    ),
+  )
+
+  it.live("downloads nothing when the credential now signs in to another workspace", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Other") })
+
+          const skills = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+            resolve: () =>
+              Effect.succeed(Credential.Key.make({ type: "key", key: "secret", metadata: { orgID: "org_other" } })),
+          })
+
+          expect(skills).toEqual([])
+          expect(console.state.requests).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("downloads a skill once when two sessions need it at the same time", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () =>
+            Bun.sleep(100).then(() =>
+              bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Console"), "references/a.md": "A" }),
+            )
+          const load = loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+          })
+
+          const results = yield* Effect.all([load, load], { concurrency: 2 })
+
+          expect(results.map((skills) => skills.map((item) => item.description))).toEqual([["Console"], ["Console"]])
+          expect(console.state.requests).toHaveLength(1)
         }),
       ),
     ),

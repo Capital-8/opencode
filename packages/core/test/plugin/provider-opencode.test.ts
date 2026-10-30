@@ -1853,7 +1853,11 @@ describe("OpencodePlugin with a Console config", () => {
             const config = yield* Config.Service
             yield* credentials.create({
               integrationID: Integration.ID.make("opencode"),
-              value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
+              value: Credential.Key.make({
+                type: "key",
+                key: "secret",
+                metadata: { server: server.url.origin, orgID: "org_acme" },
+              }),
             })
             yield* addPlugin().pipe(inProcess(server))
 
@@ -1870,6 +1874,7 @@ describe("OpencodePlugin with a Console config", () => {
               skills: [{ slug: "review", version: "skl_1:1" }],
             })
             expect(document.origin).toBe(server.url.origin)
+            expect(document.orgID).toBe("org_acme")
             expect(Object.keys(info.mcp?.servers ?? {})).toEqual(["remote"])
             const remote = required(info.providers?.remote)
             expect(remote.env).toBeUndefined()

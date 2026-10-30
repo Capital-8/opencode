@@ -45,6 +45,7 @@ import { FileSystem } from "../filesystem.js"
 import { LocationWatcherPolicy } from "../filesystem/location-watcher-policy.js"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Image } from "../image.js"
 import { InstructionDiscovery } from "../instruction-discovery.js"
 import { Integration } from "../integration.js"
@@ -119,6 +120,7 @@ const services = [
   Config.Service,
   Credential.Service,
   Bus.Service,
+  EffectFlock.Service,
   Environment.Service,
   FileAccess.Service,
   FileMutation.Service,
@@ -174,6 +176,7 @@ export const requirements = LayerNode.group([
   Config.node,
   Credential.node,
   Bus.node,
+  EffectFlock.node,
   Environment.node,
   FileAccess.node,
   FileMutation.node,

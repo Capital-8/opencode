@@ -162,7 +162,8 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       organization: string | undefined
       // The Console server the config came from, which serves its Library's skill files.
       origin: string | undefined
-    } = { remote: undefined, connection: undefined, organization: undefined, origin: undefined }
+      orgID: string | undefined
+    } = { remote: undefined, connection: undefined, organization: undefined, origin: undefined, orgID: undefined }
     // Status last reported for the active connection, so inference failures can name the fix.
     let reported: IntegrationConnection.Status | undefined
     let explainers: Effect.Success<ReturnType<typeof ctx.session.hook>>[] = []
@@ -174,7 +175,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       const connection = yield* ctx.integration.connection.active("opencode")
       if (!connection) {
         reported = undefined
-        return { remote: undefined, connection, organization: undefined, origin: undefined }
+        return { remote: undefined, connection, organization: undefined, origin: undefined, orgID: undefined }
       }
       const status = (status: IntegrationConnection.Status | undefined) => {
         reported = status
@@ -188,6 +189,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
               connection,
               organization: undefined,
               origin: undefined,
+              orgID: undefined,
             })
           return Effect.all([fetchConfig(http, credential), normalizeServer(ConsoleAccess.server(credential))]).pipe(
             Effect.map(([remote, origin]) => ({
@@ -195,6 +197,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
               connection,
               organization: organizationName(credential),
               origin,
+              orgID: typeof credential.metadata?.orgID === "string" ? credential.metadata.orgID : undefined,
             })),
           )
         }),
@@ -208,8 +211,14 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
             // A load that fails for the connection already in place keeps its last config: dropping it
             // would lift organization policy while personal credentials keep working.
             return IntegrationConnection.key(connection) === IntegrationConnection.key(snapshot.connection)
-              ? { remote: snapshot.remote, connection, organization: snapshot.organization, origin: snapshot.origin }
-              : { remote: undefined, connection, organization: undefined, origin: undefined }
+              ? {
+                  remote: snapshot.remote,
+                  connection,
+                  organization: snapshot.organization,
+                  origin: snapshot.origin,
+                  orgID: snapshot.orgID,
+                }
+              : { remote: undefined, connection, organization: undefined, origin: undefined, orgID: undefined }
           }),
         ),
       )
@@ -238,6 +247,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
                 : next.connection,
             organization: next.organization,
             origin: next.origin,
+            orgID: next.orgID,
             info: next.remote,
           }),
       )

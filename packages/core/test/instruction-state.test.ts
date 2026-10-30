@@ -7,6 +7,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Event } from "@opencode/schema/event"
 import { EventTable } from "@opencode/core/event/sql"
+import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { Instructions } from "@opencode/core/instructions/index"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -23,7 +24,7 @@ import {
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
-  AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node]), [
+  AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, InstructionDiscovery.node]), [
     Bus.node.replace(Bus.configured({ persist: true })),
   ]),
 )
@@ -225,6 +226,31 @@ describe("InstructionState", () => {
         [Instructions.hash("retired")]: "retired",
         [Instructions.hash("changed")]: "changed",
       })
+    }),
+  )
+
+  it.effect("tells a live session when its instructions only change order", () =>
+    Effect.gen(function* () {
+      const sessionID = SessionSchema.ID.make("ses_instruction_reorder")
+      const { db, events } = yield* setup(sessionID)
+      const discovery = yield* InstructionDiscovery.Service
+      const required = new InstructionDiscovery.File({ path: "OpenCode Console instruction ins_1", content: "one" })
+      const optional = new InstructionDiscovery.File({ path: "OpenCode Console instruction ins_2", content: "two" })
+      const arrange = (files: InstructionDiscovery.File[]) =>
+        discovery.transform((editor) => {
+          for (const file of files) editor.add(file)
+        })
+
+      const first = yield* arrange([required, optional])
+      yield* InstructionState.prepare(db, events, yield* discovery.load(), sessionID)
+      yield* first.dispose
+      yield* arrange([optional, required])
+      yield* InstructionState.prepare(db, events, yield* discovery.load(), sessionID)
+
+      expect((yield* instructionEvents(db, sessionID)).map((event) => event.data.text)).toEqual([
+        undefined,
+        "The instructions now apply in this order:\n- OpenCode Console instruction ins_2\n- OpenCode Console instruction ins_1",
+      ])
     }),
   )
 
