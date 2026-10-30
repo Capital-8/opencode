@@ -60,9 +60,6 @@ mod signals {
 
     pub(super) struct Blocked(libc::sigset_t);
 
-    // SAFETY: a sigset_t is plain data.
-    unsafe impl Send for Blocked {}
-
     /// Blocks the stop signals on the calling thread, and restores their
     /// default action: macOS never delivers an ignored signal to `sigwait`,
     /// and a launcher may have left SIGINT ignored.
