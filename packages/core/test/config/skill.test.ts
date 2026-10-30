@@ -70,9 +70,7 @@ const startEntries = Effect.fnUntraced(function* (
   yield* ConfigCompatibilityPlugin.Plugin.effect(pluginHost).pipe(
     Effect.provide(Config.testLayer(entries, compatibility)),
   )
-  yield* ConfigSkillPlugin.Plugin.effect(
-    pluginHost,
-  ).pipe(
+  yield* ConfigSkillPlugin.Plugin.effect(pluginHost).pipe(
     Effect.provide(Config.testLayer(entries, compatibility)),
     Effect.provideService(SkillDiscovery.Service, discovery),
     Effect.provideService(Global.Service, Global.Service.of({ ...Global.make(), home })),
@@ -136,9 +134,9 @@ describe("SkillFile.parse", () => {
     expect(parse("disable-model-invocation: yes")).toMatchObject({ skill: { autoinvoke: false } })
     expect(parse("disable-model-invocation: false")).not.toMatchObject({ skill: { autoinvoke: expect.anything() } })
     expect(parse("disable-model-invocation: maybe")).not.toMatchObject({ skill: { autoinvoke: expect.anything() } })
-    expect(
-      parse("disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: true"),
-    ).toMatchObject({ skill: { autoinvoke: true } })
+    expect(parse("disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: true")).toMatchObject({
+      skill: { autoinvoke: true },
+    })
   })
 
   test("parses root and nested skill ids and metadata flags", () => {
@@ -211,7 +209,9 @@ describe("ConfigSkillPlugin.Plugin", () => {
             { claude: [AbsolutePath.make(claude)], agents: [AbsolutePath.make(agents)] },
           )
           const watcher = yield* Watcher.Test
-          expect(yield* watcher.subscriptions()).toEqual(expected.map((item) => ({ path: item, type: "directory", ignore: SkillScan.ignore.toSorted() })))
+          expect(yield* watcher.subscriptions()).toEqual(
+            expected.map((item) => ({ path: item, type: "directory", ignore: SkillScan.ignore.toSorted() })),
+          )
         }),
       ),
     ),
@@ -289,16 +289,16 @@ describe("ConfigSkillPlugin.Plugin", () => {
     ),
   )
 
-  it.live("pulls Console skill catalogs with the Console connection's credentials, and others without", () =>
+  it.live("pulls Console skill catalogs with the connection's credentials and cache, and others without", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) =>
         Effect.gen(function* () {
           const library = "https://console.example.test/console/api/v2/library/skills/#v=abc"
           const remote = "https://example.test/skills/"
-          const pulls: { url: string; headers?: Record<string, string> }[] = []
+          const pulls: { url: string; headers?: Record<string, string>; scope?: string }[] = []
           const discovery = SkillDiscovery.Service.of({
-            pull: (url, headers) => {
-              pulls.push({ url, headers })
+            pull: (url, headers, scope) => {
+              pulls.push({ url, headers, scope })
               return Effect.succeed([])
             },
           })
@@ -336,8 +336,12 @@ describe("ConfigSkillPlugin.Plugin", () => {
             },
           )
           expect(pulls).toEqual([
-            { url: remote, headers: undefined },
-            { url: library, headers: { authorization: "Bearer secret", "x-org-id": "org_acme" } },
+            { url: remote, headers: undefined, scope: undefined },
+            {
+              url: library,
+              headers: { authorization: "Bearer secret", "x-org-id": "org_acme" },
+              scope: JSON.stringify(["opencode", "cred_console", "org_acme"]),
+            },
           ])
         }),
       ),
@@ -527,10 +531,10 @@ describe("ConfigSkillPlugin.Plugin", () => {
           expect((yield* service.list()).find((item) => item.id === "review")?.description).toBe("Review once")
         }).pipe(
           Effect.provide(
-            Config.testLayer(
-              [new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })],
-              { claude: [AbsolutePath.make(path.join(tmp.path, ".claude"))], agents: [] },
-            ),
+            Config.testLayer([new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })], {
+              claude: [AbsolutePath.make(path.join(tmp.path, ".claude"))],
+              agents: [],
+            }),
           ),
         ),
       ),

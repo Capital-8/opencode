@@ -38,7 +38,7 @@ const fixture = Effect.gen(function* () {
     pull: (
       skills: unknown[],
       files: Record<string, string> = {},
-      options: { url?: string; headers?: Record<string, string> } = {},
+      options: { url?: string; headers?: Record<string, string>; scope?: string } = {},
     ) =>
       Effect.gen(function* () {
         state.skills = skills
@@ -48,7 +48,7 @@ const fixture = Effect.gen(function* () {
         // Rebuild per pull so repeated calls exercise the disk cache, not a shared service.
         const directories = yield* Effect.gen(function* () {
           const discovery = yield* SkillDiscovery.Service
-          return yield* discovery.pull(options.url ?? base, options.headers)
+          return yield* discovery.pull(options.url ?? base, options.headers, options.scope)
         }).pipe(
           Effect.provide(
             AppNodeBuilder.build(SkillDiscovery.node, [Global.node.replace(Global.layerWith({ cache: tmp.path }))]),
@@ -190,6 +190,29 @@ describe("SkillDiscovery.pull", () => {
       })
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# New")
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "old.md")).exists())).toBe(false)
+    }),
+  )
+
+  it.live(
+    "keeps each scope's files apart when two readers share one catalog URL",
+    Effect.gen(function* () {
+      const catalog = yield* fixture
+      const acme = yield* catalog.pull(
+        [{ name: "deploy", files: ["SKILL.md"] }],
+        { "/catalog/deploy/SKILL.md": "# Acme" },
+        { scope: "org_acme" },
+      )
+      const globex = yield* catalog.pull(
+        [{ name: "deploy", files: ["SKILL.md"] }],
+        { "/catalog/deploy/SKILL.md": "# Globex" },
+        { scope: "org_globex" },
+      )
+
+      expect(globex.directories).not.toEqual(acme.directories)
+      expect(yield* Effect.promise(() => Bun.file(path.join(acme.directories[0], "SKILL.md")).text())).toBe("# Acme")
+      expect(yield* Effect.promise(() => Bun.file(path.join(globex.directories[0], "SKILL.md")).text())).toBe(
+        "# Globex",
+      )
     }),
   )
 })

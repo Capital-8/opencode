@@ -56,8 +56,11 @@ class Index extends Schema.Class<Index>("SkillDiscovery.Index")({
 }) {}
 
 export interface Interface {
-  /** Downloads a catalog's skills, sending `headers` with the index and every file request. */
-  readonly pull: (url: string, headers?: Record<string, string>) => Effect.Effect<AbsolutePath[]>
+  /**
+   * Downloads a catalog's skills, sending `headers` with the index and every file request. `scope` keeps a separate
+   * cache for each reader of one catalog URL, such as two workspaces on the same Console server.
+   */
+  readonly pull: (url: string, headers?: Record<string, string>, scope?: string) => Effect.Effect<AbsolutePath[]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SkillDiscovery") {}
@@ -95,7 +98,7 @@ const layer = Layer.effect(
     })
 
     return Service.of({
-      pull: Effect.fn("SkillDiscovery.pull")(function* (url, headers = {}) {
+      pull: Effect.fn("SkillDiscovery.pull")(function* (url, headers = {}, scope) {
         // A fragment only versions the config entry, so a new fragment reuses the cache and per-skill versions.
         const unversioned = new URL(url)
         unversioned.hash = ""
@@ -113,7 +116,11 @@ const layer = Layer.effect(
         )
         if (!data) return []
 
-        const sourceRoot = path.resolve(global.cache, "skills", Hash.fast(base))
+        const sourceRoot = path.resolve(
+          global.cache,
+          "skills",
+          Hash.fast(scope === undefined ? base : `${base}\n${scope}`),
+        )
         return yield* Effect.forEach(
           data.skills.flatMap((skill) => {
             if (!isSafeSegment(skill.name)) {

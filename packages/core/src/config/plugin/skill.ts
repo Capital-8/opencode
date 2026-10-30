@@ -118,9 +118,15 @@ export const Plugin = define({
       const credential = yield* ctx.integration.connection.resolve(owner.connection)
       if (!credential || credential.type === "external")
         return yield* Effect.fail(new Error(`${owner.integrationID} is not connected`))
+      // Every workspace on a server shares its catalog URL, so each connection and workspace gets its own cache.
+      const scope = JSON.stringify([
+        owner.integrationID,
+        owner.connection.type === "credential" ? owner.connection.id : owner.connection.name,
+        credential.metadata?.orgID ?? null,
+      ])
       // The connection's credentials must not follow a redirect to another server.
       return yield* discovery
-        .pull(url, ConsoleAccess.headers(credential))
+        .pull(url, ConsoleAccess.headers(credential), scope)
         .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }))
     })
 
