@@ -474,8 +474,8 @@ const OPTIONAL_TOOL_FIELDS = {
 
 /**
  * Returns why a listed tool cannot be used, or undefined when it can. A malformed optional field is
- * deleted instead, keeping the tool. Schemas are kept as the server sent them: the legacy SDK schema
- * walked every property schema, which cost most of the time on large catalogs.
+ * deleted instead, keeping the tool. Property schemas are not walked: the legacy SDK schema did, which
+ * cost most of the time on large catalogs.
  */
 function checkTool(tool: unknown) {
   if (!isRecord(tool)) return "not an object"
@@ -483,6 +483,13 @@ function checkTool(tool: unknown) {
   if (!isRecord(tool.inputSchema)) return "inputSchema is not an object"
   if (tool.inputSchema.type !== undefined && tool.inputSchema.type !== "object")
     return 'inputSchema type is not "object"'
+  // Providers that check tool parameters against the JSON Schema metaschema reject the whole request
+  // over a malformed top level, so drop it; nested property schemas are left as sent.
+  if (tool.inputSchema.properties !== undefined && !isRecord(tool.inputSchema.properties))
+    delete tool.inputSchema.properties
+  const required = tool.inputSchema.required
+  if (required !== undefined && !(Array.isArray(required) && required.every((key) => typeof key === "string")))
+    delete tool.inputSchema.required
   for (const [key, kind] of Object.entries(OPTIONAL_TOOL_FIELDS)) {
     const value = tool[key]
     if (value === undefined) continue

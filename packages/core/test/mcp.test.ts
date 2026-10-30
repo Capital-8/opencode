@@ -99,8 +99,8 @@ function resourceServer(
     urlElicitation?: boolean
     /**
      * Ahead of the valid tools, list entries that cannot be used (not an object, no name, an input
-     * schema that is not an object), one whose `required` is a string, which only the 2026-07-28 SDK
-     * schema accepts, and one with a malformed description.
+     * schema that is not an object), one whose input schema has a string `required`, and one with a
+     * malformed description.
      */
     malformedTool?: boolean
     /** Legacy servers give up on the URL elicitation after this many milliseconds. */
@@ -160,7 +160,7 @@ function resourceServer(
                     { inputSchema: { type: "object" } },
                     { name: "no-schema" },
                     { name: "malformed", inputSchema: { type: "string" } },
-                    { name: "modern-only", inputSchema: { type: "object", required: "text" } },
+                    { name: "bad-required", inputSchema: { type: "object", required: "text" } },
                     { name: "bad-description", description: 42, inputSchema: { type: "object" } },
                   ] as unknown as McpClient.Tool[])
                 : []),
@@ -1213,10 +1213,13 @@ describe.each([
           )
 
           const tools = yield* connection.tools()
-          expect(tools.map((tool) => tool.name)).toEqual(["modern-only", "bad-description", "echo"])
-          // A malformed optional field is dropped, not the tool.
-          expect(tools[1]).toEqual({ name: "bad-description", inputSchema: { type: "object" } })
-          for (const name of ["modern-only", "bad-description", "echo"]) {
+          expect(tools.map((tool) => tool.name)).toEqual(["bad-required", "bad-description", "echo"])
+          // A malformed optional field or top-level `required` is dropped, not the tool.
+          expect(tools.slice(0, 2)).toEqual([
+            { name: "bad-required", inputSchema: { type: "object" } },
+            { name: "bad-description", inputSchema: { type: "object" } },
+          ])
+          for (const name of ["bad-required", "bad-description", "echo"]) {
             yield* connection.callTool({ name, args: { text: "hi" } })
             expect(server.state.toolCalls.at(-1)).toMatchObject({ name, arguments: { text: "hi" } })
           }
