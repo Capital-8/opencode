@@ -62,14 +62,6 @@ const isTransient = (error: unknown) =>
 export type { GetPromptResult, Prompt, ReadResourceResult, Resource, Tool }
 export type ResourceTemplate = ResourceTemplateType
 
-// The era codec is protected; it checks a tools/list result against the exact schema the SDK applies
-// for the negotiated protocol era, so a tool is skipped only when the SDK itself would reject it.
-class ToolCheckingClient extends Client {
-  checkToolsList(result: unknown) {
-    return this._wireCodec().validateResult("tools/list", result)
-  }
-}
-
 export class NeedsAuthError extends Schema.TaggedError<NeedsAuthError>()("MCP.NeedsAuthError", {
   server: Schema.String,
   message: Schema.String,
@@ -209,7 +201,7 @@ export const connect = Effect.fnUntraced(function* (
     const context = yield* Effect.context()
     const runFork = Effect.runForkWith(context)
     const runPromise = Effect.runPromiseWith(context)
-    const client = new ToolCheckingClient(clientInfo, {
+    const client = new Client(clientInfo, {
       capabilities: {
         ...(elicitation ? { elicitation: { form: {}, url: {} } } : {}),
         // Legacy era only: roots are deprecated as of 2026-07-28 and modern servers cannot request them.
@@ -239,25 +231,20 @@ export const connect = Effect.fnUntraced(function* (
       )
     }
 
-    // The SDK validates tools/list as a whole, so one malformed tool would fail every tool on the server.
-    // The SDK runs a handler set on the transport before connect ahead of its own, on the same message,
-    // so tools it would reject are dropped there and it still caches the rest. A page that fails for
-    // another reason is left for the SDK to report.
+    // Our SDK patch leaves tools/list items unchecked, so one malformed tool no longer fails every tool
+    // on the server; they are checked here instead. The SDK runs a handler set on the transport before
+    // connect ahead of its own, on the same message, so it caches only the tools kept here.
     const onmessage = transport.onmessage
     transport.onmessage = (message, extra) => {
-      if (
-        isJSONRPCResultResponse(message) &&
-        Array.isArray(message.result.tools) &&
-        client.checkToolsList({ ...message.result, tools: [] }).ok
-      )
+      if (isJSONRPCResultResponse(message) && Array.isArray(message.result.tools))
         message.result.tools = message.result.tools.filter((tool: unknown) => {
-          const outcome = client.checkToolsList({ ...message.result, tools: [tool] })
-          if (outcome.ok) return true
+          const reason = checkTool(tool)
+          if (reason === undefined) return true
           runFork(
             Effect.logWarning("skipping invalid MCP tool", {
               server,
-              tool: typeof tool === "object" && tool !== null && "name" in tool ? tool.name : undefined,
-              error: outcome.reason === "invalid" ? outcome.message : outcome.reason,
+              tool: isRecord(tool) && typeof tool.name === "string" ? tool.name : undefined,
+              reason,
             }),
           )
           return false
@@ -473,6 +460,40 @@ function rejectsUnknownQuery(url: URL) {
   if (/(^|\.)zohomcp\.[a-z.]+$/.test(url.hostname)) return true
   // Loopback servers run on this machine (Figma Desktop's Dev Mode MCP returns 404), so they are not hosted Code Mode servers.
   return url.hostname === "localhost" || url.hostname === "[::1]" || /^127(\.\d+){3}$/.test(url.hostname)
+}
+
+const OPTIONAL_TOOL_FIELDS = {
+  description: "string",
+  title: "string",
+  outputSchema: "object",
+  annotations: "object",
+  execution: "object",
+  icons: "array",
+  _meta: "object",
+} as const
+
+/**
+ * Returns why a listed tool cannot be used, or undefined when it can. A malformed optional field is
+ * deleted instead, keeping the tool. Schemas are kept as the server sent them: the legacy SDK schema
+ * walked every property schema, which cost most of the time on large catalogs.
+ */
+function checkTool(tool: unknown) {
+  if (!isRecord(tool)) return "not an object"
+  if (typeof tool.name !== "string" || tool.name === "") return "name is not a non-empty string"
+  if (!isRecord(tool.inputSchema)) return "inputSchema is not an object"
+  if (tool.inputSchema.type !== undefined && tool.inputSchema.type !== "object")
+    return 'inputSchema type is not "object"'
+  for (const [key, kind] of Object.entries(OPTIONAL_TOOL_FIELDS)) {
+    const value = tool[key]
+    if (value === undefined) continue
+    if (kind === "string" ? typeof value !== "string" : kind === "array" ? !Array.isArray(value) : !isRecord(value))
+      delete tool[key]
+  }
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 // Absent config is legacy: the SDK sends the plain initialize handshake with no discover probe.

@@ -98,8 +98,9 @@ function resourceServer(
     emptyElicitation?: boolean
     urlElicitation?: boolean
     /**
-     * List a tool whose input schema is not an object, and one whose `required` is a string, which
-     * only the 2026-07-28 schema accepts, ahead of the valid tools.
+     * Ahead of the valid tools, list entries that cannot be used (not an object, no name, an input
+     * schema that is not an object), one whose `required` is a string, which only the 2026-07-28 SDK
+     * schema accepts, and one with a malformed description.
      */
     malformedTool?: boolean
     /** Legacy servers give up on the URL elicitation after this many milliseconds. */
@@ -154,13 +155,14 @@ function resourceServer(
             tools: [
               // Servers send raw JSON; the cast lets the fixture send a tool the schema rejects.
               ...(input.malformedTool
-                ? [
-                    { name: "malformed", inputSchema: { type: "string" } } as unknown as McpClient.Tool,
-                    {
-                      name: "modern-only",
-                      inputSchema: { type: "object", required: "text" },
-                    } as unknown as McpClient.Tool,
-                  ]
+                ? ([
+                    "not-a-tool",
+                    { inputSchema: { type: "object" } },
+                    { name: "no-schema" },
+                    { name: "malformed", inputSchema: { type: "string" } },
+                    { name: "modern-only", inputSchema: { type: "object", required: "text" } },
+                    { name: "bad-description", description: 42, inputSchema: { type: "object" } },
+                  ] as unknown as McpClient.Tool[])
                 : []),
               ...(input.emptyElicitation
                 ? [{ name: "empty-elicitation", inputSchema: { type: "object" as const, properties: {} } }]
@@ -1199,7 +1201,7 @@ describe.each([
     )
   })
 
-  test("skips tools the SDK rejects and keeps the rest of the server's tools", async () => {
+  test("skips unusable tools and keeps the rest of the server's tools", async () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -1210,12 +1212,14 @@ describe.each([
             import.meta.dir,
           )
 
-          // Only tools the SDK itself would reject for the negotiated era are skipped.
-          expect((yield* connection.tools()).map((tool) => tool.name)).toEqual(
-            era === "modern" ? ["modern-only", "echo"] : ["echo"],
-          )
-          yield* connection.callTool({ name: "echo", args: { text: "hi" } })
-          expect(server.state.toolCalls.at(-1)).toMatchObject({ name: "echo", arguments: { text: "hi" } })
+          const tools = yield* connection.tools()
+          expect(tools.map((tool) => tool.name)).toEqual(["modern-only", "bad-description", "echo"])
+          // A malformed optional field is dropped, not the tool.
+          expect(tools[1]).toEqual({ name: "bad-description", inputSchema: { type: "object" } })
+          for (const name of ["modern-only", "bad-description", "echo"]) {
+            yield* connection.callTool({ name, args: { text: "hi" } })
+            expect(server.state.toolCalls.at(-1)).toMatchObject({ name, arguments: { text: "hi" } })
+          }
         }),
       ),
     )
