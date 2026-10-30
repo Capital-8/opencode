@@ -19,47 +19,113 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_ACCEPTS_PER_PASS: usize = 64;
 
 pub fn run(directory: &Path) -> Result<()> {
+    // First, before bind starts the sweeper thread: every thread created after
+    // this inherits the mask, so only the signal thread ever receives them.
+    #[cfg(unix)]
+    let signals = signals::block()?;
     // Before bind, so a failure here leaves nothing to clean up.
     let wake = Wake::new()?;
     let (runtime, listener) = platform::Runtime::bind(directory)?;
     // Created after bind so bind I/O does not consume the acquire window.
     let control = Arc::new(Control::new(wake, Ownership::new(Instant::now())));
     #[cfg(unix)]
-    stop_on_signals(&control)?;
+    if let Err(error) = signals::stop_on(signals, &control) {
+        let _ = runtime.finish();
+        return Err(error);
+    }
     serve(runtime, listener, control, Settings::default())
 }
 
-/// Turns SIGTERM and SIGINT into an orderly stop, so children are killed and the
-/// runtime directory is removed instead of the daemon dying with both left behind.
+/// Turns SIGTERM and SIGINT into an orderly stop, so children are killed and
+/// the runtime directory is removed instead of the daemon dying with both left
+/// behind.
 ///
-/// The signals are blocked on this thread before any worker exists, so every later
-/// thread inherits the mask and only the waiter receives them. Children never
-/// inherit it: std and portable-pty reset the signal mask before `exec`.
+/// Children inherit the signal mask across `exec`. portable-pty resets it for
+/// PTY children; anything else the daemon spawns must reset it itself.
 #[cfg(unix)]
-fn stop_on_signals(control: &Arc<Control>) -> Result<()> {
-    use nix::sys::signal::{SigSet, Signal};
+mod signals {
+    use std::io;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    let mut signals = SigSet::empty();
-    signals.add(Signal::SIGTERM);
-    signals.add(Signal::SIGINT);
-    signals
-        .thread_block()
-        .context("failed to block stop signals")?;
-    let control = Arc::clone(control);
-    thread::Builder::new()
-        .name("opencode-pty-signals".into())
-        .spawn(move || {
-            if signals.wait().is_err() {
-                return;
+    use anyhow::{Context, Result};
+
+    use super::Control;
+
+    const STOP: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
+    /// A second signal this soon after the first is part of the same stop
+    /// (Ctrl-C plus a wrapper's SIGTERM), not a sign that the stop is stuck.
+    const REPEAT_GRACE: Duration = Duration::from_secs(1);
+
+    pub(super) struct Blocked(libc::sigset_t);
+
+    // SAFETY: a sigset_t is plain data.
+    unsafe impl Send for Blocked {}
+
+    /// Blocks the stop signals on the calling thread, and restores their
+    /// default action: macOS never delivers an ignored signal to `sigwait`,
+    /// and a launcher may have left SIGINT ignored.
+    pub(super) fn block() -> Result<Blocked> {
+        // SAFETY: plain libc calls on a local, initialized signal set.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for signal in STOP {
+                libc::sigaddset(&mut set, signal);
             }
-            control.request_stop();
-            // A second signal means the orderly stop is stuck; exit like the default action.
-            if let Ok(signal) = signals.wait() {
-                std::process::exit(128 + signal as i32);
+            let result = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result))
+                    .context("failed to block stop signals");
             }
-        })
-        .context("failed to start the signal thread")?;
-    Ok(())
+            // Only after blocking, so there is no window where the default
+            // action could kill the daemon.
+            for signal in STOP {
+                libc::signal(signal, libc::SIG_DFL);
+            }
+            Ok(Blocked(set))
+        }
+    }
+
+    pub(super) fn stop_on(signals: Blocked, control: &Arc<Control>) -> Result<()> {
+        let control = Arc::clone(control);
+        thread::Builder::new()
+            .name("opencode-pty-signals".into())
+            .spawn(move || {
+                wait(&signals);
+                let stopped = Instant::now();
+                control.request_stop();
+                loop {
+                    let signal = wait(&signals);
+                    if stopped.elapsed() >= REPEAT_GRACE {
+                        // The orderly stop is stuck. Exit without running exit
+                        // handlers, which other threads may be blocking.
+                        // SAFETY: `_exit` is always safe to call.
+                        unsafe { libc::_exit(128 + signal) };
+                    }
+                }
+            })
+            .context("failed to start the signal thread")?;
+        Ok(())
+    }
+
+    fn wait(signals: &Blocked) -> libc::c_int {
+        loop {
+            let mut signal = 0;
+            // SAFETY: valid set and out pointer; `sigwait` returns an error
+            // number instead of setting errno, and fills `signal` on success.
+            let result = unsafe { libc::sigwait(&signals.0, &mut signal) };
+            if result == 0 {
+                return signal;
+            }
+            // EINTR (after SIGSTOP and SIGCONT) just retries. Nothing else is
+            // expected for valid signals; pause so it can't spin.
+            if result != libc::EINTR {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 struct Settings {

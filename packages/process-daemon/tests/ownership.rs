@@ -545,14 +545,11 @@ fn stop_signals_stop_terminals_and_clean_up() {
         assert!(matches!(response, Response::Owned));
         let terminal = daemon.terminal("exec sleep 1000");
 
-        // The daemon blocks these signals for its own threads; its children must not
-        // inherit that mask, so a terminal's process still dies from SIGTERM.
+        // The daemon blocks these signals on its own threads; its children must not
+        // inherit that mask, so a terminal's process still dies from the signal.
         let probe = daemon.terminal("exec sleep 1000");
         // SAFETY: the probe PID belongs to this test's live terminal.
-        assert_eq!(
-            unsafe { libc::kill(probe.pid.unwrap() as i32, libc::SIGTERM) },
-            0
-        );
+        assert_eq!(unsafe { libc::kill(probe.pid.unwrap() as i32, signal) }, 0);
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let Response::Terminals { terminals } = daemon.request(Request::List) else {
@@ -568,7 +565,7 @@ fn stop_signals_stop_terminals_and_clean_up() {
             if exited {
                 break;
             }
-            assert!(Instant::now() < deadline, "probe ignored SIGTERM");
+            assert!(Instant::now() < deadline, "probe ignored signal {signal}");
             thread::sleep(Duration::from_millis(10));
         }
 
