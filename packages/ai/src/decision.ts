@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import { DecisionClient, Service, type Execute } from "./decision-client.js"
 import { Media } from "./media.js"
 import { tryRequest } from "./media-model.js"
+import { ModelString } from "./model-string.js"
 import {
   AIError,
   HttpOptions,
@@ -232,7 +233,9 @@ export const DecisionModelSchema = Schema.declare((value): value is DecisionMode
   expected: "Decision.Model",
 })
 
-export type DecisionModelOptions<Model> = Model extends DecisionModel<infer Options> ? Options : never
+/** The model's typed options; a `"provider/model"` string takes untyped `DecisionOptions`. */
+export type DecisionModelOptions<Model> =
+  Model extends DecisionModel<infer Options> ? Options : Model extends string ? DecisionOptions : never
 
 // ---------------------------------------------------------------------------
 // Request and response
@@ -257,8 +260,9 @@ export type DecisionRequestFor<
   readonly providerOptions?: Options
 }
 
+/** Calls also accept a `"provider/model"` string as the model. */
 export type DecisionRequestInput<
-  Model extends DecisionModel = DecisionModel,
+  Model extends DecisionModel | string = DecisionModel,
   Questions extends DecisionQuestions = DecisionQuestions,
 > = {
   readonly model: Model
@@ -305,11 +309,14 @@ export function request(input: DecisionRequest | DecisionRequestInput) {
   })
 }
 
-export function generate<const Model extends DecisionModel, const Questions extends DecisionQuestions>(
+export function generate<const Model extends DecisionModel | string, const Questions extends DecisionQuestions>(
   input: DecisionRequestInput<Model, Questions>,
 ): Effect.Effect<DecisionResponseFor<Questions>, AIError, Service>
-export function generate(input: DecisionRequest | DecisionRequestInput) {
-  return tryRequest(() => request(input)).pipe(Effect.flatMap(DecisionClient.generate))
+export function generate(input: DecisionRequestInput<DecisionModel | string>) {
+  return ModelString.decision(input.model).pipe(
+    Effect.flatMap((model) => tryRequest(() => request({ ...input, model }))),
+    Effect.flatMap(DecisionClient.generate),
+  )
 }
 
 export const Decision = {

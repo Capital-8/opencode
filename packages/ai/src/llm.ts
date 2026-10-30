@@ -1,5 +1,6 @@
 import { Effect, JsonSchema, Schema, Stream } from "effect"
 import { tryRequest } from "./media-model.js"
+import { ModelString } from "./model-string.js"
 import { LLMClient, Service, type StreamOptions } from "./route/client.js"
 import {
   GenerationOptions,
@@ -22,8 +23,11 @@ import {
 import { tool, toDefinitions, type ExecutableTool, type Tool, type ToolSchema } from "./tool.js"
 import { ToolRuntime } from "./tool-runtime.js"
 
-/** Input accepted by `LLM.request`, normalized into the canonical `LLMRequest` class. */
-export type RequestInput<SelectedLanguageModel extends LanguageModel = LanguageModel> = Omit<
+/**
+ * Input accepted by `LLM.request`, normalized into the canonical `LLMRequest` class. Calls also accept a
+ * `"provider/model"` string as the model.
+ */
+export type RequestInput<SelectedLanguageModel extends LanguageModel | string = LanguageModel> = Omit<
   ConstructorParameters<typeof LLMRequest>[0],
   "model" | "system" | "messages" | "tools" | "toolChoice" | "generation" | "http" | "providerOptions"
 > & {
@@ -38,23 +42,23 @@ export type RequestInput<SelectedLanguageModel extends LanguageModel = LanguageM
   readonly http?: HttpOptions.Input
 }
 
-export function generate<const Model extends LanguageModel>(
+export function generate<const Model extends LanguageModel | string>(
   input: RequestInput<Model> | LLMRequest,
   options?: StreamOptions,
 ): Effect.Effect<LLMResponse, AIError, Service>
-export function generate(input: RequestInput | LLMRequest, options?: StreamOptions) {
+export function generate(input: AnyRequestInput | LLMRequest, options?: StreamOptions) {
   return requestEffect(input).pipe(Effect.flatMap((request) => LLMClient.generate(request, options)))
 }
 
-export function stream<const Model extends LanguageModel>(
+export function stream<const Model extends LanguageModel | string>(
   input: RequestInput<Model> | LLMRequest,
   options?: StreamOptions,
 ): Stream.Stream<LLMEvent, AIError, Service>
-export function stream(input: RequestInput | LLMRequest, options?: StreamOptions) {
+export function stream(input: AnyRequestInput | LLMRequest, options?: StreamOptions) {
   return Stream.unwrap(requestEffect(input).pipe(Effect.map((request) => LLMClient.stream(request, options))))
 }
 
-export type LoopInput<SelectedLanguageModel extends LanguageModel = LanguageModel> = Omit<
+export type LoopInput<SelectedLanguageModel extends LanguageModel | string = LanguageModel> = Omit<
   RequestInput<SelectedLanguageModel>,
   "tools"
 > & {
@@ -67,11 +71,11 @@ export type LoopInput<SelectedLanguageModel extends LanguageModel = LanguageMode
  * Stream model calls, running the model's tool calls between them, until a step has no client-executed tool calls,
  * reports a provider error, or `until` returns `true`. Each step's `step-start` and `step-finish` carry its step index.
  */
-export function loop<const Model extends LanguageModel>(
+export function loop<const Model extends LanguageModel | string>(
   input: LoopInput<Model>,
   options?: StreamOptions,
 ): Stream.Stream<LLMEvent, AIError, Service>
-export function loop(input: LoopInput, options?: StreamOptions) {
+export function loop(input: LoopInput<LanguageModel | string>, options?: StreamOptions) {
   const { tools, until, ...rest } = input
   const step = (request: LLMRequest, steps: ReadonlyArray<LLMResponse>): Stream.Stream<LLMEvent, AIError, Service> =>
     Stream.suspend(() => {
@@ -121,8 +125,12 @@ export function loop(input: LoopInput, options?: StreamOptions) {
   )
 }
 
-const requestEffect = (input: RequestInput | LLMRequest) =>
-  input instanceof LLMRequest ? Effect.succeed(input) : tryRequest(() => request(input))
+type AnyRequestInput = RequestInput<LanguageModel | string>
+
+const requestEffect = (input: AnyRequestInput | LLMRequest) =>
+  input instanceof LLMRequest
+    ? Effect.succeed(input)
+    : ModelString.language(input.model).pipe(Effect.flatMap((model) => tryRequest(() => request({ ...input, model }))))
 
 export const request = <const SelectedLanguageModel extends LanguageModel>(
   input: RequestInput<SelectedLanguageModel>,
@@ -154,7 +162,7 @@ const GENERATE_OBJECT_TOOL_NAME = "generate_object"
 
 const GENERATE_OBJECT_TOOL_DESCRIPTION = "Return the structured result by calling this tool."
 
-type GenerateObjectBase<SelectedLanguageModel extends LanguageModel = LanguageModel> = Omit<
+type GenerateObjectBase<SelectedLanguageModel extends LanguageModel | string = LanguageModel> = Omit<
   RequestInput<SelectedLanguageModel>,
   "tools" | "toolChoice"
 >
@@ -176,20 +184,22 @@ export class GenerateObjectResponse<T> {
 
 export interface GenerateObjectOptions<
   S extends ToolSchema<any>,
-  SelectedLanguageModel extends LanguageModel = LanguageModel,
+  SelectedLanguageModel extends LanguageModel | string = LanguageModel,
 > extends GenerateObjectBase<SelectedLanguageModel> {
   readonly schema: S
 }
 
-export interface GenerateObjectDynamicOptions<SelectedLanguageModel extends LanguageModel = LanguageModel>
+export interface GenerateObjectDynamicOptions<SelectedLanguageModel extends LanguageModel | string = LanguageModel>
   extends GenerateObjectBase<SelectedLanguageModel> {
   /** Raw JSON Schema object describing the expected output shape. */
   readonly jsonSchema: JsonSchema.JsonSchema
 }
 
-const runGenerateObject = Effect.fn("LLM.generateObject")(function* (options: GenerateObjectBase, tool: Tool) {
-  const baseRequest = request(options)
-  const generateRequest = LLMRequest.update(baseRequest, {
+const runGenerateObject = Effect.fn("LLM.generateObject")(function* (
+  options: GenerateObjectBase<LanguageModel | string>,
+  tool: Tool,
+) {
+  const generateRequest = LLMRequest.update(yield* requestEffect(options), {
     tools: toDefinitions({ [GENERATE_OBJECT_TOOL_NAME]: tool }),
     toolChoice: ToolChoice.named(GENERATE_OBJECT_TOOL_NAME),
   })
@@ -228,13 +238,17 @@ const runGenerateObject = Effect.fn("LLM.generateObject")(function* (options: Ge
  * 2. `jsonSchema: JsonSchema.JsonSchema` — `.object` is `unknown`. Use when
  *    the schema is only available at runtime (MCP, plugin manifests). Caller validates.
  */
-export function generateObject<const SelectedLanguageModel extends LanguageModel, S extends ToolSchema<any>>(
+export function generateObject<const SelectedLanguageModel extends LanguageModel | string, S extends ToolSchema<any>>(
   options: GenerateObjectOptions<S, SelectedLanguageModel>,
 ): Effect.Effect<GenerateObjectResponse<Schema.Schema.Type<S>>, AIError, Service>
-export function generateObject<const SelectedLanguageModel extends LanguageModel>(
+export function generateObject<const SelectedLanguageModel extends LanguageModel | string>(
   options: GenerateObjectDynamicOptions<SelectedLanguageModel>,
 ): Effect.Effect<GenerateObjectResponse<unknown>, AIError, Service>
-export function generateObject(options: GenerateObjectOptions<ToolSchema<any>> | GenerateObjectDynamicOptions) {
+export function generateObject(
+  options:
+    | GenerateObjectOptions<ToolSchema<any>, LanguageModel | string>
+    | GenerateObjectDynamicOptions<LanguageModel | string>,
+) {
   if ("schema" in options) {
     const { schema, ...rest } = options
     return runGenerateObject(rest, tool({ description: GENERATE_OBJECT_TOOL_DESCRIPTION, parameters: schema }))

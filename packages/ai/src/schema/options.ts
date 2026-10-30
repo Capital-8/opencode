@@ -335,8 +335,9 @@ export namespace LanguageModel {
 
 export type LanguageModelInput = LanguageModel.Input
 
+/** The model's typed options; a `"provider/model"` string takes untyped `ProviderOptions`. */
 export type LanguageModelProviderOptions<SelectedModel> =
-  SelectedModel extends LanguageModel<infer Options> ? Options : never
+  SelectedModel extends LanguageModel<infer Options> ? Options : SelectedModel extends string ? ProviderOptions : never
 
 export const LanguageModelSchema = Schema.declare((value): value is LanguageModel => value instanceof LanguageModel, {
   expected: "LLM.LanguageModel",

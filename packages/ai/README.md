@@ -22,6 +22,14 @@ for await (const event of ai.stream(ai.request(input))) {
 }
 ```
 
+A `"provider/model"` string works anywhere a text, image, or decision model does. It loads that provider's default
+model with its env key and no settings, so `"openai/gpt-5.4"` behaves like `OpenAI.model("gpt-5.4")`; the model id is
+everything after the first `/`. `ai.request` needs a model object, since it builds the request synchronously.
+
+```ts
+await ai.generate({ model: "openai/gpt-5.4", prompt: "Hi" })
+```
+
 The Effect API lives at `@opencode/ai/effect`. Its `ai` has the same namespaces and methods, returning `Effect` or
 `Stream`:
 

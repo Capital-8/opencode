@@ -2,6 +2,7 @@ import { Effect, Schema, Stream } from "effect"
 import { Generation, ProgressEvent, QueuedEvent, type AwaitOptions } from "./generation.js"
 import { Media } from "./media.js"
 import { MediaModel, composeRoute, tryRequest } from "./media-model.js"
+import { ModelString } from "./model-string.js"
 import { MediaRoute } from "./route/media.js"
 import { AIError, HttpOptions, MediaUsage, ProviderMetadata, ProviderOptions, type OpenString } from "./schema/index.js"
 import { ImageClient, Service } from "./image-client.js"
@@ -80,9 +81,12 @@ export type ImageRequestFor<Options extends ImageOptions = ImageOptions> = Omit<
   readonly providerOptions?: Options
 }
 
-export type ImageModelOptions<Model> = Model extends ImageModel<infer Options> ? Options : never
+/** The model's typed options; a `"provider/model"` string takes untyped `ImageOptions`. */
+export type ImageModelOptions<Model> =
+  Model extends ImageModel<infer Options> ? Options : Model extends string ? ImageOptions : never
 
-export type ImageRequestInput<Model extends ImageModel = ImageModel> = Omit<
+/** Calls also accept a `"provider/model"` string as the model. */
+export type ImageRequestInput<Model extends ImageModel | string = ImageModel> = Omit<
   ConstructorParameters<typeof ImageRequest>[0],
   "model" | "providerOptions" | "http" | "resolution"
 > & {
@@ -172,34 +176,42 @@ export function request(input: ImageRequest | ImageRequestInput) {
   })
 }
 
-const requestEffect = (input: ImageRequest | ImageRequestInput) => tryRequest(() => request(input))
+type AnyRequestInput = ImageRequestInput<ImageModel | string>
 
-export function generate<const Model extends ImageModel>(
+const requestEffect = (input: ImageRequest | AnyRequestInput) =>
+  input instanceof ImageRequest
+    ? Effect.succeed(input)
+    : ModelString.image(input.model).pipe(Effect.flatMap((model) => tryRequest(() => request({ ...input, model }))))
+
+export function generate<const Model extends ImageModel | string>(
   input: ImageRequest | ImageRequestInput<Model>,
   options?: AwaitOptions,
 ): Effect.Effect<ImageResponse, AIError, Service>
-export function generate(input: ImageRequest | ImageRequestInput, options?: AwaitOptions) {
+export function generate(input: ImageRequest | AnyRequestInput, options?: AwaitOptions) {
   return requestEffect(input).pipe(Effect.flatMap((request) => ImageClient.generate(request, options)))
 }
 
-export function stream<const Model extends ImageModel>(
+export function stream<const Model extends ImageModel | string>(
   input: ImageRequest | ImageRequestInput<Model>,
   options?: AwaitOptions,
 ): Stream.Stream<ImageEvent, AIError, Service>
-export function stream(input: ImageRequest | ImageRequestInput, options?: AwaitOptions) {
+export function stream(input: ImageRequest | AnyRequestInput, options?: AwaitOptions) {
   return Stream.unwrap(requestEffect(input).pipe(Effect.map((request) => ImageClient.stream(request, options))))
 }
 
 /** Inline and streaming routes fail with `UnsupportedOperation`. */
-export function start<const Model extends ImageModel>(
+export function start<const Model extends ImageModel | string>(
   input: ImageRequest | ImageRequestInput<Model>,
 ): Effect.Effect<Generation<ImageResponse>, AIError, Service>
-export function start(input: ImageRequest | ImageRequestInput) {
+export function start(input: ImageRequest | AnyRequestInput) {
   return requestEffect(input).pipe(Effect.flatMap((request) => ImageClient.start(request)))
 }
 
-export const resume = (model: ImageModel, token: unknown): Effect.Effect<Generation<ImageResponse>, AIError, Service> =>
-  ImageClient.resume(model, token)
+export const resume = (
+  model: ImageModel | string,
+  token: unknown,
+): Effect.Effect<Generation<ImageResponse>, AIError, Service> =>
+  ModelString.image(model).pipe(Effect.flatMap((model) => ImageClient.resume(model, token)))
 
 export const Image = {
   request,

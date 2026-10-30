@@ -115,16 +115,18 @@ export const make = <R = never>(options: Options<R> = {}) => {
       ),
     )
 
-  function generateObject<const Model extends LanguageModel, S extends ToolSchema<any>>(
+  function generateObject<const Model extends LanguageModel | string, S extends ToolSchema<any>>(
     input: GenerateObjectOptions<S, Model>,
     options?: RunOptions,
   ): Promise<GenerateObjectResponse<Schema.Schema.Type<S>>>
-  function generateObject<const Model extends LanguageModel>(
+  function generateObject<const Model extends LanguageModel | string>(
     input: GenerateObjectDynamicOptions<Model>,
     options?: RunOptions,
   ): Promise<GenerateObjectResponse<unknown>>
   function generateObject(
-    input: GenerateObjectOptions<ToolSchema<any>> | GenerateObjectDynamicOptions,
+    input:
+      | GenerateObjectOptions<ToolSchema<any>, LanguageModel | string>
+      | GenerateObjectDynamicOptions<LanguageModel | string>,
     options?: RunOptions,
   ) {
     return run("schema" in input ? LLM.generateObject(input) : LLM.generateObject(input), options)
@@ -196,17 +198,19 @@ export const make = <R = never>(options: Options<R> = {}) => {
       )
     },
     request: LLM.request,
-    generate: <const Model extends LanguageModel>(
+    generate: <const Model extends LanguageModel | string>(
       input: RequestInput<Model> | LLMRequest,
       options?: StreamOptions & RunOptions,
     ) => run(LLM.generate(input, options), options),
-    stream: <const Model extends LanguageModel>(
+    stream: <const Model extends LanguageModel | string>(
       input: RequestInput<Model> | LLMRequest,
       options?: StreamOptions & RunOptions,
     ) => iterate(LLM.stream(input, options), options),
     /** Stream model calls, running their tool calls, until the model stops calling tools or `until` is true. */
-    loop: <const Model extends LanguageModel>(input: LoopInput<Model>, options?: StreamOptions & RunOptions) =>
-      iterate(LLM.loop(input, options), options),
+    loop: <const Model extends LanguageModel | string>(
+      input: LoopInput<Model>,
+      options?: StreamOptions & RunOptions,
+    ) => iterate(LLM.loop(input, options), options),
     /** Decode the model's output against `schema` (or `jsonSchema`, unvalidated). */
     generateObject,
     /** Compact a Responses request: a replacement window, or a checkpoint with `mechanism: "trigger"`. */
@@ -214,22 +218,24 @@ export const make = <R = never>(options: Options<R> = {}) => {
     canCompact: LLM.canCompact,
     image: {
       request: Image.request,
-      generate: <const Model extends ImageModel>(
+      generate: <const Model extends ImageModel | string>(
         input: ImageRequestInput<Model> | ImageRequest,
         options?: AwaitOptions & RunOptions,
       ) => run(Image.generate(input, options), options),
-      stream: <const Model extends ImageModel>(
+      stream: <const Model extends ImageModel | string>(
         input: ImageRequestInput<Model> | ImageRequest,
         options?: AwaitOptions & RunOptions,
       ) => iterate(Image.stream(input, options), options),
-      start: <const Model extends ImageModel>(input: ImageRequestInput<Model> | ImageRequest, options?: RunOptions) =>
-        run(Image.start(input), options).then(handle),
-      resume: (model: ImageModel, token: unknown, options?: RunOptions) =>
+      start: <const Model extends ImageModel | string>(
+        input: ImageRequestInput<Model> | ImageRequest,
+        options?: RunOptions,
+      ) => run(Image.start(input), options).then(handle),
+      resume: (model: ImageModel | string, token: unknown, options?: RunOptions) =>
         run(Image.resume(model, token), options).then(handle),
     },
     decision: {
       request: Decision.request,
-      generate: <const Model extends DecisionModel, const Questions extends DecisionQuestions>(
+      generate: <const Model extends DecisionModel | string, const Questions extends DecisionQuestions>(
         input: DecisionRequestInput<Model, Questions>,
         options?: RunOptions,
       ) => run(Decision.generate(input), options),
