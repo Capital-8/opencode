@@ -155,7 +155,7 @@ export function VoiceCallButton(props: { session: SessionInfo | undefined }) {
           size="large"
           variant="ghost"
           class="voice-call-start"
-          icon={<Icon name="phone" />}
+          icon={<Icon name="voice" />}
           aria-label={language.t("voice.call")}
           onMouseDown={(event: MouseEvent) => event.preventDefault()}
           onClick={() => {

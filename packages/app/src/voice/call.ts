@@ -1,4 +1,5 @@
 import type { SessionInfo } from "@opencode/client/promise"
+import { sessionLabel } from "@/session/title"
 import type { ServerCtx } from "@/runtime/server/runtime"
 import type { Platform } from "@/runtime/platform/platform"
 import { VoiceGates } from "./gates"
@@ -87,7 +88,7 @@ export function createVoiceCall(input: {
 
   function view(session: SessionInfo) {
     state.viewing = session
-    input.change({ title: session.title ?? session.id })
+    input.change({ title: sessionLabel(session) })
     const transport = state.transport
 
     if (!state.ready || !transport) return

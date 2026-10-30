@@ -227,7 +227,7 @@ export function DialogVoiceOnboarding(props: { ctx: ServerCtx; directory?: strin
 }
 
 const features = [
-  { icon: "outline-wave-audio", title: "voice.onboarding.speak.title", body: "voice.onboarding.speak.body" },
+  { icon: "voice", title: "voice.onboarding.speak.title", body: "voice.onboarding.speak.body" },
   { icon: "transcript", title: "voice.onboarding.follow.title", body: "voice.onboarding.follow.body" },
   { icon: "microphone", title: "voice.onboarding.control.title", body: "voice.onboarding.control.body" },
 ] as const satisfies readonly { icon: IconName; title: string; body: string }[]

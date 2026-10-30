@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from "@solidjs/router"
 import { onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import type { SessionInfo } from "@opencode/client/promise"
+import { sessionLabel } from "@/session/title"
 import { usePlatform } from "@/runtime/platform/platform"
 import { Persist, persisted } from "@/runtime/persistence/storage"
 import { Persistence } from "@/runtime/persistence/schema"
@@ -13,6 +14,7 @@ import type { ServerConnection } from "@/runtime/server/registry"
 import { sessionHref } from "@/shell/routes/session"
 import { findSessionTab, useTabs } from "@/shell/tabs/tabs"
 import type { CallState, createVoiceCall } from "./call"
+import { VoiceSounds } from "./sounds"
 
 export const { provider: VoiceProvider, use: useVoice } = createSimpleContext({
   name: "Voice",
@@ -73,6 +75,7 @@ export const { provider: VoiceProvider, use: useVoice } = createSimpleContext({
       })
 
     const end = async () => {
+      if (state.status === "connecting" || state.status === "connected") VoiceSounds.end()
       const generation = ++current.generation
       const call = current.call
       current.call = undefined
@@ -111,6 +114,7 @@ export const { provider: VoiceProvider, use: useVoice } = createSimpleContext({
 
     const start = async (server: ServerConnection.Key, ctx: ServerCtx, session: SessionInfo) => {
       if (state.status !== "idle") return
+      VoiceSounds.press()
       target.server = server
       target.ctx = ctx
       target.session = session
@@ -118,7 +122,7 @@ export const { provider: VoiceProvider, use: useVoice } = createSimpleContext({
       setState({
         status: "connecting",
         server,
-        title: session.title ?? session.id,
+        title: sessionLabel(session),
         failure: undefined,
         since: undefined,
         caption: "",
@@ -136,6 +140,10 @@ export const { provider: VoiceProvider, use: useVoice } = createSimpleContext({
               tabs.store.flatMap((tab) => (tab.type === "session" && tab.server === server ? [tab.sessionId] : [])),
             change: (change) => {
               if (current.generation !== generation) return
+
+              if (change.status === "connected" && state.status !== "connected") VoiceSounds.connect()
+
+              if (change.status === "dropped" && state.status !== "dropped") VoiceSounds.end()
               setState(change)
               caption(change)
             },
