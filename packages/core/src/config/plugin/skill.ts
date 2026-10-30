@@ -237,8 +237,10 @@ export const Plugin = define({
       const content =
         (yield* cached) ??
         (yield* Effect.gen(function* () {
-          // Locations and processes share the cache: one downloads while the others wait, then reuse its copy.
-          yield* flock.acquire(`console-skill:${input.root}`, undefined, { timeoutMs: 60_000 })
+          // Locations and processes share the cache: one downloads while the others wait, then reuse its copy. A live
+          // holder heartbeats every staleMs / 3 through the 30 s download; a crashed one's lock breaks well before the
+          // waiters give up.
+          yield* flock.acquire(`console-skill:${input.root}`, undefined, { staleMs: 10_000, timeoutMs: 35_000 })
           const current = yield* cached
           if (current !== undefined) return current
           yield* download(input)
