@@ -62,6 +62,7 @@ export const configure = (input: Config = {}) => {
         provider: id,
         providerOptions: mergeProviderOptions({ response_format: "base64" }, providerOptions),
         sizing: imageSizing,
+        imageInput: "none",
       }),
     configure,
   }

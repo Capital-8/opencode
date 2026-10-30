@@ -81,7 +81,14 @@ export const configure = (input: Config = {}) => {
     ),
   }
   const image = (modelID: string | ModelID, providerOptions?: ProviderOptions) =>
-    OpenAIImages.model({ ...media, id: modelID, provider: id, providerOptions, sizing: imageSizing })
+    OpenAIImages.model({
+      ...media,
+      id: modelID,
+      provider: id,
+      providerOptions,
+      sizing: imageSizing,
+      imageInput: "none",
+    })
   return { id, model: chat, chat, responses, image, configure }
 }
 
