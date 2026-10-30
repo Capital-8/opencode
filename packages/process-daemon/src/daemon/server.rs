@@ -24,7 +24,42 @@ pub fn run(directory: &Path) -> Result<()> {
     let (runtime, listener) = platform::Runtime::bind(directory)?;
     // Created after bind so bind I/O does not consume the acquire window.
     let control = Arc::new(Control::new(wake, Ownership::new(Instant::now())));
+    #[cfg(unix)]
+    stop_on_signals(&control)?;
     serve(runtime, listener, control, Settings::default())
+}
+
+/// Turns SIGTERM and SIGINT into an orderly stop, so children are killed and the
+/// runtime directory is removed instead of the daemon dying with both left behind.
+///
+/// The signals are blocked on this thread before any worker exists, so every later
+/// thread inherits the mask and only the waiter receives them. Children never
+/// inherit it: std and portable-pty reset the signal mask before `exec`.
+#[cfg(unix)]
+fn stop_on_signals(control: &Arc<Control>) -> Result<()> {
+    use nix::sys::signal::{SigSet, Signal};
+
+    let mut signals = SigSet::empty();
+    signals.add(Signal::SIGTERM);
+    signals.add(Signal::SIGINT);
+    signals
+        .thread_block()
+        .context("failed to block stop signals")?;
+    let control = Arc::clone(control);
+    thread::Builder::new()
+        .name("opencode-pty-signals".into())
+        .spawn(move || {
+            if signals.wait().is_err() {
+                return;
+            }
+            control.request_stop();
+            // A second signal means the orderly stop is stuck; exit like the default action.
+            if let Ok(signal) = signals.wait() {
+                std::process::exit(128 + signal as i32);
+            }
+        })
+        .context("failed to start the signal thread")?;
+    Ok(())
 }
 
 struct Settings {

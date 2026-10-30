@@ -536,3 +536,45 @@ fn shutdown_keeps_a_replaced_socket() {
     drop(replacement);
     std::fs::remove_file(&daemon.registration.socket).unwrap();
 }
+
+#[test]
+fn stop_signals_stop_terminals_and_clean_up() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let mut daemon = Daemon::start();
+        let (_owner, response) = daemon.own(None);
+        assert!(matches!(response, Response::Owned));
+        let terminal = daemon.terminal("exec sleep 1000");
+
+        // The daemon blocks these signals for its own threads; its children must not
+        // inherit that mask, so a terminal's process still dies from SIGTERM.
+        let probe = daemon.terminal("exec sleep 1000");
+        // SAFETY: the probe PID belongs to this test's live terminal.
+        assert_eq!(
+            unsafe { libc::kill(probe.pid.unwrap() as i32, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let Response::Terminals { terminals } = daemon.request(Request::List) else {
+                panic!("list failed");
+            };
+            let exited = terminals.iter().any(|value| {
+                value.id == probe.id
+                    && !matches!(
+                        value.lifecycle,
+                        opencode_pty::service::TerminalLifecycle::Running
+                    )
+            });
+            if exited {
+                break;
+            }
+            assert!(Instant::now() < deadline, "probe ignored SIGTERM");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // SAFETY: the PID belongs to the daemon this test spawned.
+        assert_eq!(unsafe { libc::kill(daemon.child.id() as i32, signal) }, 0);
+        daemon.wait();
+        assert_terminal_stopped(&terminal);
+    }
+}
