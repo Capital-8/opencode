@@ -17,8 +17,7 @@ const fixture = Effect.gen(function* () {
     skills: unknown[]
     files: Record<string, string>
     requests: string[]
-    authorizations: (string | undefined)[]
-  } = { skills: [], files: {}, requests: [], authorizations: [] }
+  } = { skills: [], files: {}, requests: [] }
   const server = yield* NodeHttpServer.make(createServer, { host: "127.0.0.1", port: 0 })
   const base = new URL("/catalog/", HttpServer.formatAddress(server.address)).href
   yield* server.serve(
@@ -26,7 +25,6 @@ const fixture = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest
       const url = new URL(request.url, base)
       state.requests.push(url.href)
-      state.authorizations.push(request.headers.authorization)
       const body =
         url.pathname === "/catalog/index.json" ? JSON.stringify({ skills: state.skills }) : state.files[url.pathname]
       return HttpServerResponse.text(body ?? "Not Found", { status: body === undefined ? 404 : 200 })
@@ -35,26 +33,21 @@ const fixture = Effect.gen(function* () {
   return {
     cache: tmp.path,
     base,
-    pull: (
-      skills: unknown[],
-      files: Record<string, string> = {},
-      options: { url?: string; headers?: Record<string, string>; scope?: string } = {},
-    ) =>
+    pull: (skills: unknown[], files: Record<string, string> = {}) =>
       Effect.gen(function* () {
         state.skills = skills
         state.files = files
         state.requests = []
-        state.authorizations = []
         // Rebuild per pull so repeated calls exercise the disk cache, not a shared service.
         const directories = yield* Effect.gen(function* () {
           const discovery = yield* SkillDiscovery.Service
-          return yield* discovery.pull(options.url ?? base, options.headers, options.scope)
+          return yield* discovery.pull(base)
         }).pipe(
           Effect.provide(
             AppNodeBuilder.build(SkillDiscovery.node, [Global.node.replace(Global.layerWith({ cache: tmp.path }))]),
           ),
         )
-        return { directories, requests: state.requests.slice(), authorizations: state.authorizations.slice() }
+        return { directories, requests: state.requests.slice() }
       }),
   }
 })
@@ -136,40 +129,6 @@ describe("SkillDiscovery.pull", () => {
   )
 
   it.live(
-    "sends the given headers with the index and every file",
-    Effect.gen(function* () {
-      const catalog = yield* fixture
-      const result = yield* catalog.pull(
-        [{ name: "deploy", files: ["SKILL.md", "references/guide.md"] }],
-        { "/catalog/deploy/SKILL.md": "# Deploy", "/catalog/deploy/references/guide.md": "# Guide" },
-        { headers: { authorization: "Bearer secret" } },
-      )
-      expect(result.directories).toHaveLength(1)
-      expect(result.authorizations).toEqual(["Bearer secret", "Bearer secret", "Bearer secret"])
-    }),
-  )
-
-  it.live(
-    "reuses the cache when only the URL fragment changes",
-    Effect.gen(function* () {
-      const catalog = yield* fixture
-      const first = yield* catalog.pull(
-        [{ name: "deploy", version: "1", files: ["SKILL.md"] }],
-        { "/catalog/deploy/SKILL.md": "# Deploy" },
-        { url: `${catalog.base}#v=1` },
-      )
-      const second = yield* catalog.pull(
-        [{ name: "deploy", version: "1", files: ["SKILL.md"] }],
-        { "/catalog/deploy/SKILL.md": "# Ignored" },
-        { url: `${catalog.base}#v=2` },
-      )
-      expect(first.requests.toSorted()).toEqual([`${catalog.base}deploy/SKILL.md`, `${catalog.base}index.json`])
-      expect(second.directories).toEqual(first.directories)
-      expect(second.requests).toEqual([`${catalog.base}index.json`])
-    }),
-  )
-
-  it.live(
     "publishes complete updates and removes stale files",
     Effect.gen(function* () {
       const catalog = yield* fixture
@@ -190,29 +149,6 @@ describe("SkillDiscovery.pull", () => {
       })
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "SKILL.md")).text())).toBe("# New")
       expect(yield* Effect.promise(() => Bun.file(path.join(root, "old.md")).exists())).toBe(false)
-    }),
-  )
-
-  it.live(
-    "keeps each scope's files apart when two readers share one catalog URL",
-    Effect.gen(function* () {
-      const catalog = yield* fixture
-      const acme = yield* catalog.pull(
-        [{ name: "deploy", files: ["SKILL.md"] }],
-        { "/catalog/deploy/SKILL.md": "# Acme" },
-        { scope: "org_acme" },
-      )
-      const globex = yield* catalog.pull(
-        [{ name: "deploy", files: ["SKILL.md"] }],
-        { "/catalog/deploy/SKILL.md": "# Globex" },
-        { scope: "org_globex" },
-      )
-
-      expect(globex.directories).not.toEqual(acme.directories)
-      expect(yield* Effect.promise(() => Bun.file(path.join(acme.directories[0], "SKILL.md")).text())).toBe("# Acme")
-      expect(yield* Effect.promise(() => Bun.file(path.join(globex.directories[0], "SKILL.md")).text())).toBe(
-        "# Globex",
-      )
     }),
   )
 })

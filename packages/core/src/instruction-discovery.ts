@@ -8,7 +8,7 @@ import { Instructions } from "./instructions/index.js"
 import { State } from "./state.js"
 
 export class File extends Schema.Class<File>("InstructionDiscovery.File")({
-  // An absolute file path, or the URL of a configured remote instruction.
+  // An absolute file path, the URL of a configured remote instruction, or an OpenCode Console instruction's label.
   path: Schema.String,
   content: Schema.String,
 }) {}

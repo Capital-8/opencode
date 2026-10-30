@@ -6,9 +6,8 @@ import { Global } from "@opencode/util/global"
 import { sameDirectory } from "@opencode/util/path"
 import path, { dirname, join } from "path"
 import { Effect, FiberMap, PubSub, Semaphore, Stream } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { Config } from "../../config.js"
-import { ConsoleAccess } from "../../console-access.js"
 import { ConfigIntegration } from "../integration.js"
 import { Watcher } from "../../filesystem/watcher.js"
 import { InstructionDiscovery } from "../../instruction-discovery.js"
@@ -42,9 +41,14 @@ export const Plugin = define({
       const stop = FSUtil.contains(home, start) ? home : root
       const globalFile = yield* fs.resolve(join(global.config, "AGENTS.md"))
       const loaded: { current: Loaded } = { current: { type: "available", files: [] } }
-      const configured: { sources: string[]; remote: Map<string, InstructionDiscovery.File> } = {
+      const configured: {
+        sources: string[]
+        remote: Map<string, InstructionDiscovery.File>
+        library: InstructionDiscovery.File[]
+      } = {
         sources: [],
         remote: new Map(),
+        library: [],
       }
 
       const publish = (update: Watcher.Update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid)
@@ -156,16 +160,11 @@ export const Plugin = define({
           const sources = Array.from(
             new Set(entries.flatMap((entry) => (entry.type === "document" ? (entry.info.instructions ?? []) : []))),
           )
-          // An integration document's URLs are under its connection's server and need that connection's credentials.
-          const owners = new Map(
-            entries
-              .filter((entry): entry is ConfigIntegration.Document => entry instanceof ConfigIntegration.Document)
-              .flatMap((document) => (document.info.instructions ?? []).map((url) => [url, document] as const)),
-          )
           const fetched = yield* Effect.forEach(
             sources.filter(isUrl),
             (url) =>
-              get(url, owners.get(url)).pipe(
+              HttpClientRequest.get(url).pipe(
+                http.execute,
                 Effect.flatMap((response) => response.text),
                 Effect.timeout("5 seconds"),
                 Effect.map((content) => new InstructionDiscovery.File({ path: url, content })),
@@ -178,23 +177,23 @@ export const Plugin = define({
             { concurrency: 4 },
           )
           configured.sources = sources
+          // Keyed by ID, which stays put across renames and edits, so changes render as diffs.
+          configured.library = entries
+            .filter((entry): entry is ConfigIntegration.Document => entry instanceof ConfigIntegration.Document)
+            .flatMap((document) => document.library?.instructions ?? [])
+            .map(
+              (instruction) =>
+                new InstructionDiscovery.File({
+                  path: `OpenCode Console instruction ${instruction.id}`,
+                  content: instruction.content,
+                }),
+            )
           configured.remote = new Map(
             fetched.filter((file) => file !== undefined).map((file) => [file.path, file] as const),
           )
         },
         (effect) => lock.withPermit(effect),
       )
-
-      const get = Effect.fnUntraced(function* (url: string, owner: ConfigIntegration.Document | undefined) {
-        if (!owner) return yield* http.execute(HttpClientRequest.get(url))
-        const credential = yield* ctx.integration.connection.resolve(owner.connection)
-        if (!credential || credential.type === "external")
-          return yield* Effect.fail(new Error(`${owner.integrationID} is not connected`))
-        // The connection's credentials must not follow a redirect to another server.
-        return yield* http
-          .execute(HttpClientRequest.get(url).pipe(HttpClientRequest.setHeaders(ConsoleAccess.headers(credential))))
-          .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }))
-      })
 
       const isolate = <A, E, R>(source: string, effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
@@ -214,7 +213,11 @@ export const Plugin = define({
           })
           loaded.current =
             Array.isArray(sources.global) && Array.isArray(sources.project) && Array.isArray(sources.configured)
-              ? { type: "available", files: [...sources.global, ...sources.project, ...sources.configured] }
+              ? {
+                  type: "available",
+                  // Console instructions are the most widely shared, so they lead the prompt.
+                  files: [...configured.library, ...sources.global, ...sources.project, ...sources.configured],
+                }
               : { type: "unavailable" }
           if (!file) return
           yield* Effect.logDebug("instructions rescanned", {

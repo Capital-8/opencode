@@ -26,6 +26,26 @@ export const Policies = Schema.Array(Schema.Unknown).pipe(
 )
 
 /**
+ * The OpenCode Console's Library for the connection's workspace: instructions with their content, in the order they
+ * load, and skills whose files download from the Console once per version.
+ */
+export const Library = Schema.Struct({
+  instructions: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, content: Schema.String })).pipe(
+    Schema.optional,
+  ),
+  skills: Schema.Array(Schema.Struct({ slug: Schema.String, version: Schema.String })).pipe(Schema.optional),
+})
+export type Library = typeof Library.Type
+
+// A malformed library is dropped instead of failing the whole remote config, which would drop its policies too.
+const RemoteLibrary = Schema.Unknown.pipe(
+  Schema.decodeTo(Schema.UndefinedOr(Library), {
+    decode: SchemaGetter.transform((library) => Option.getOrUndefined(Schema.decodeUnknownOption(Library)(library))),
+    encode: SchemaGetter.passthrough({ strict: false }),
+  }),
+)
+
+/**
  * The allow-listed keys of a remote config. Only these keys are read before decoding, so a newer remote source's
  * other keys, valid or not, can never reject the document.
  */
@@ -34,8 +54,7 @@ export const Remote = Schema.Struct({
   mcp: Config.Info.fields.mcp,
   policies: Policies.pipe(Schema.optional),
   websearch: Config.Info.fields.websearch,
-  instructions: Config.Info.fields.instructions,
-  skills: Config.Info.fields.skills,
+  library: RemoteLibrary.pipe(Schema.optional),
 })
 export type Remote = typeof Remote.Type
 
@@ -49,11 +68,10 @@ export class Document extends Config.Document.extend<Document>("Config.Integrati
   connection: Connection.Info,
   /** Organization behind the connection, named in denials by the document's policies. */
   organization: Schema.optional(Schema.String),
-  /**
-   * Server behind the connection, without a trailing slash. The document's instruction and skill URLs are under it
-   * and are fetched with the connection's credentials.
-   */
+  /** Server behind the connection, without a trailing slash. The library's skill files download from it. */
   origin: Schema.optional(Schema.String),
+  /** Library content the connection's workspace shares. It is not user config, so it stays out of `info`. */
+  library: Schema.optional(Library),
 }) {}
 
 /**
@@ -75,8 +93,8 @@ export function suppliers(entries: readonly Entry[]) {
 
 /**
  * Builds an integration document from the allow-listed keys of a remote config: providers, remote MCP servers,
- * policies, the web search selection, and instruction and skill URLs under `origin`. A remote source can never load
- * plugins, run commands, read local files, or change any other local behavior through config.
+ * policies, the web search selection, and the Library. A remote source can never load plugins, run commands, or
+ * change any other local behavior through config.
  */
 export function make(input: {
   readonly integrationID: IntegrationID
@@ -86,20 +104,13 @@ export function make(input: {
   readonly info: Remote
 }) {
   const servers = input.info.mcp?.servers
-  // Local paths would read this machine's files into context, and these URLs are fetched with the connection's
-  // credentials, so only URLs under the connection's own server survive.
-  const owned = (sources: readonly string[] | undefined) =>
-    sources?.flatMap((source) => {
-      if (!input.origin || !URL.canParse(source)) return []
-      const url = new URL(source)
-      return /^https?:$/.test(url.protocol) && url.href.startsWith(`${input.origin}/`) ? [url.href] : []
-    })
   return new Document({
     type: "document",
     integrationID: input.integrationID,
     connection: input.connection,
     organization: input.organization,
     origin: input.origin,
+    library: input.info.library,
     info: new Config.Info({
       providers:
         input.info.providers &&
@@ -137,8 +148,6 @@ export function make(input: {
         }),
       policies: input.info.policies,
       websearch: input.info.websearch,
-      instructions: owned(input.info.instructions),
-      skills: owned(input.info.skills),
     }),
   })
 }

@@ -1801,15 +1801,14 @@ describe("OpencodePlugin with a Console config", () => {
   )
 
   it.effect(
-    "passes only providers, remote MCP servers, policies, web search, and Console instruction and skill URLs, without credentials",
+    "passes only providers, remote MCP servers, policies, the web search selection, and the Library, without credentials",
     () =>
       Effect.acquireUseRelease(
         Effect.sync(() =>
           Bun.serve({
             port: 0,
-            fetch: (request) => {
-              const origin = new URL(request.url).origin
-              return Response.json({
+            fetch: () =>
+              Response.json({
                 $schema,
                 providers: {
                   remote: {
@@ -1837,21 +1836,15 @@ describe("OpencodePlugin with a Console config", () => {
                 commands: { console: { template: "Console command" } },
                 permissions: [{ action: "shell", resource: "*", effect: "allow" }],
                 formatter: { console: { command: ["/tmp/console-formatter"] } },
-                // Only URLs under the Console server survive: local paths would read this machine's files, and
-                // other servers would receive the Console credentials.
-                instructions: [
-                  `${origin}/console/api/v2/library/instructions/ins_1/team.md?v=1`,
-                  `${origin}/api/v2/library/instructions/ins_1/team.md`,
-                  `${origin}/console-other/team.md`,
-                  "https://example.test/console/team.md",
-                  "/tmp/console-instructions.md",
-                  "~/console.md",
-                  "../console.md",
-                  "docs/*.md",
-                ],
-                skills: [`${origin}/console/api/v2/library/skills/#v=abc`, "./skills", "https://example.test/skills/"],
-              })
-            },
+                instructions: ["/tmp/console-instructions.md"],
+                skills: ["/tmp/console-skills"],
+                // Fields this version does not know are ignored rather than rejecting the library.
+                library: {
+                  instructions: [{ id: "ins_1", name: "Standards", content: "Be kind", future: true }],
+                  skills: [{ slug: "review", version: "skl_1:1", future: true }],
+                  future: [],
+                },
+              }),
           }),
         ),
         (server) =>
@@ -1860,29 +1853,23 @@ describe("OpencodePlugin with a Console config", () => {
             const config = yield* Config.Service
             yield* credentials.create({
               integrationID: Integration.ID.make("opencode"),
-              value: Credential.Key.make({
-                type: "key",
-                key: "secret",
-                metadata: { server: `${server.url.origin}/console` },
-              }),
+              value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
             })
             yield* addPlugin().pipe(inProcess(server))
 
             const document = required(yield* consoleDocument(config))
             const info = document.info
             expect(Object.keys(Schema.encodeSync(Info)(info)).toSorted()).toEqual([
-              "instructions",
               "mcp",
               "policies",
               "providers",
-              "skills",
               "websearch",
             ])
-            expect(document.origin).toBe(`${server.url.origin}/console`)
-            expect(info.instructions).toEqual([
-              `${server.url.origin}/console/api/v2/library/instructions/ins_1/team.md?v=1`,
-            ])
-            expect(info.skills).toEqual([`${server.url.origin}/console/api/v2/library/skills/#v=abc`])
+            expect(document.library).toEqual({
+              instructions: [{ id: "ins_1", name: "Standards", content: "Be kind" }],
+              skills: [{ slug: "review", version: "skl_1:1" }],
+            })
+            expect(document.origin).toBe(server.url.origin)
             expect(Object.keys(info.mcp?.servers ?? {})).toEqual(["remote"])
             const remote = required(info.providers?.remote)
             expect(remote.env).toBeUndefined()
@@ -1892,6 +1879,33 @@ describe("OpencodePlugin with a Console config", () => {
           }),
         (server) => Effect.promise(() => server.stop(true)),
       ),
+  )
+
+  it.effect("drops a malformed Library and keeps the Console's policies", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() =>
+        Bun.serve({
+          port: 0,
+          fetch: () =>
+            Response.json({ $schema, policies: [deny], library: { instructions: [{ id: "ins_1" }], skills: "all" } }),
+        }),
+      ),
+      (server) =>
+        Effect.gen(function* () {
+          const credentials = yield* Credential.Service
+          const config = yield* Config.Service
+          yield* credentials.create({
+            integrationID: Integration.ID.make("opencode"),
+            value: Credential.Key.make({ type: "key", key: "secret", metadata: { server: server.url.origin } }),
+          })
+          yield* addPlugin().pipe(inProcess(server))
+
+          const document = required(yield* consoleDocument(config))
+          expect(document.info.policies).toEqual([deny])
+          expect(document.library).toBeUndefined()
+        }),
+      (server) => Effect.promise(() => server.stop(true)),
+    ),
   )
 
   it.effect("keeps a newer Console config loadable despite values this version does not know", () =>
@@ -2126,8 +2140,6 @@ describe("OpencodePlugin with a Console config", () => {
               mcp: { servers: { [orgID]: { type: "remote", url: `https://${orgID}/mcp` } } },
               policies: [{ action: "tool.use", resource: `shell:${orgID}`, effect: "deny" }],
               websearch: { provider: "opencode" },
-              instructions: [`${new URL(request.url).origin}/api/v2/library/instructions/${orgID}.md`],
-              skills: [`${new URL(request.url).origin}/api/v2/library/skills/#v=${orgID}`],
             })
           },
         }),
@@ -2154,8 +2166,6 @@ describe("OpencodePlugin with a Console config", () => {
                   mcp: Object.keys(document.info.mcp?.servers ?? {}),
                   policies: document.info.policies?.map((policy) => policy.resource),
                   websearch: document.info.websearch && String(document.info.websearch.provider),
-                  instructions: document.info.instructions,
-                  skills: document.info.skills,
                 },
             ),
           )
@@ -2165,8 +2175,6 @@ describe("OpencodePlugin with a Console config", () => {
             mcp: [orgID],
             policies: [`shell:${orgID}`],
             websearch: "opencode",
-            instructions: [`${server.url.origin}/api/v2/library/instructions/${orgID}.md`],
-            skills: [`${server.url.origin}/api/v2/library/skills/#v=${orgID}`],
           })
           const alpha = yield* account("alpha")
           yield* addPlugin().pipe(inProcess(server))

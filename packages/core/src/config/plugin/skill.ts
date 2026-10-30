@@ -4,12 +4,15 @@ import { define } from "@opencode/plugin/effect/plugin"
 import type { Entry } from "@opencode/schema/config"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { Hash } from "@opencode/util/hash"
 import path from "path"
-import { Effect, FiberMap, PubSub, Semaphore, Stream } from "effect"
-import { FetchHttpClient } from "effect/http"
+import { Effect, FiberMap, PubSub, Schema, Semaphore, Stream } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { App } from "../../app.js"
 import { Config } from "../../config.js"
 import { ConsoleAccess } from "../../console-access.js"
 import { Watcher } from "../../filesystem/watcher.js"
+import { IntegrationConnection } from "../../integration/connection.js"
 import { Location } from "../../location.js"
 import { AbsolutePath } from "../../schema.js"
 import { Skill } from "../../skill.js"
@@ -20,6 +23,13 @@ import { SkillScan } from "./skill-scan.js"
 
 type Source = Skill.DirectorySource | Skill.UrlSource
 
+// One Console Library skill's files, SKILL.md first.
+const Bundle = Schema.Struct({
+  slug: Schema.String,
+  version: Schema.String,
+  files: Schema.Array(Schema.Struct({ path: Schema.String, content: Schema.String })),
+})
+
 export const Plugin = define({
   id: "opencode.config.skill",
   effect: Effect.fn(function* (ctx) {
@@ -29,6 +39,13 @@ export const Plugin = define({
     const global = yield* Global.Service
     const location = yield* Location.Service
     const watcher = yield* Watcher.Service
+    const client = yield* HttpClient.HttpClient
+    // The Console reads the User-Agent to tell which OpenCode a member runs.
+    const http = HttpClient.withScope(
+      HttpClient.filterStatusOk(
+        HttpClient.mapRequest(client, HttpClientRequest.setHeader("User-Agent", App.useragent(ctx.app))),
+      ),
+    )
     const loaded: { entries: Entry[]; skills: Skill.Info[] } = {
       entries: yield* config.entries(),
       skills: [],
@@ -108,33 +125,11 @@ export const Plugin = define({
       return result
     }
 
-    // An integration document's catalogs are under its connection's server and need that connection's credentials.
-    const pull = Effect.fnUntraced(function* (url: string) {
-      const owner = loaded.entries.find(
-        (entry): entry is ConfigIntegration.Document =>
-          entry instanceof ConfigIntegration.Document && (entry.info.skills ?? []).includes(url),
-      )
-      if (!owner) return yield* discovery.pull(url)
-      const credential = yield* ctx.integration.connection.resolve(owner.connection)
-      if (!credential || credential.type === "external")
-        return yield* Effect.fail(new Error(`${owner.integrationID} is not connected`))
-      // Every workspace on a server shares its catalog URL, so each connection and workspace gets its own cache.
-      const scope = JSON.stringify([
-        owner.integrationID,
-        owner.connection.type === "credential" ? owner.connection.id : owner.connection.name,
-        credential.metadata?.orgID ?? null,
-      ])
-      // The connection's credentials must not follow a redirect to another server.
-      return yield* discovery
-        .pull(url, ConsoleAccess.headers(credential), scope)
-        .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }))
-    })
-
     const load = Effect.fn("ConfigSkillPlugin.load")(function* (source: Source) {
       const directories =
         source.type === "directory"
           ? [source.path]
-          : yield* pull(source.url).pipe(
+          : yield* discovery.pull(source.url).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("failed to load skill source", {
                   source: Skill.Source.key(source),
@@ -171,6 +166,130 @@ export const Plugin = define({
       return skills
     })
 
+    // Console skills come from the documents' lists, never from scanning or watching the cache, so a skill the
+    // Console stops listing disappears though its files stay cached.
+    const library = Effect.fn("ConfigSkillPlugin.library")(function* () {
+      const documents = loaded.entries.filter(
+        (entry): entry is ConfigIntegration.Document => entry instanceof ConfigIntegration.Document,
+      )
+      return (yield* Effect.forEach(documents, (document) =>
+        librarySkills(document).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to load Console skills", { integrationID: document.integrationID, cause }).pipe(
+              Effect.as([] as Skill.Info[]),
+            ),
+          ),
+        ),
+      )).flat()
+    })
+
+    const librarySkills = Effect.fnUntraced(function* (document: ConfigIntegration.Document) {
+      const origin = document.origin
+      const listed = document.library?.skills ?? []
+      if (!origin || listed.length === 0) return []
+      const credential = yield* ctx.integration.connection.resolve(document.connection)
+      if (!credential || credential.type === "external")
+        return yield* Effect.fail(new Error(`${document.integrationID} is not connected`))
+      const orgID = credential.metadata?.orgID
+      // Workspaces on one server can share skill slugs, so each connection and workspace keeps its own cache.
+      const cache = path.resolve(
+        global.cache,
+        "skills",
+        Hash.fast(
+          [origin, IntegrationConnection.key(document.connection), typeof orgID === "string" ? orgID : ""].join("\n"),
+        ),
+      )
+      const skills = yield* Effect.forEach(
+        listed.filter((skill) => SkillDiscovery.isSafeSegment(skill.slug)),
+        (skill) =>
+          librarySkill({
+            url: `${origin}/api/v2/library/skills/${encodeURIComponent(skill.slug)}`,
+            headers: ConsoleAccess.headers(credential),
+            root: path.join(cache, skill.slug),
+            slug: skill.slug,
+            version: skill.version,
+          }),
+        { concurrency: 4 },
+      )
+      return skills.filter((skill) => skill !== undefined)
+    })
+
+    // A version already on disk costs no request; a failed download keeps the cached version.
+    const librarySkill = Effect.fnUntraced(function* (input: {
+      url: string
+      headers: Record<string, string>
+      root: string
+      slug: string
+      version: string
+    }) {
+      const file = path.join(input.root, "SKILL.md")
+      const current = yield* fs
+        .readFileStringSafe(path.join(input.root, ".opencode-version"))
+        .pipe(Effect.orElseSucceed(() => undefined))
+      if (current !== input.version || !(yield* fs.isFile(file)))
+        yield* download(input).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to download Console skill", { slug: input.slug, version: input.version, cause }),
+          ),
+        )
+      const content = yield* fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
+      if (!content) return undefined
+      const parsed = SkillFile.parse(input.root, file, content)
+      if (parsed._tag === "Parsed") return parsed.skill
+      yield* Effect.logDebug("skill file skipped", {
+        filepath: file,
+        reason: parsed.reason,
+        ...(parsed.reason === "frontmatter" ? { issue: parsed.issue } : {}),
+      })
+      return undefined
+    })
+
+    const download = Effect.fnUntraced(function* (input: {
+      url: string
+      headers: Record<string, string>
+      root: string
+      slug: string
+    }) {
+      const bundle = yield* http
+        .execute(
+          HttpClientRequest.get(input.url).pipe(
+            HttpClientRequest.acceptJson,
+            HttpClientRequest.setHeaders(input.headers),
+          ),
+        )
+        .pipe(
+          Effect.flatMap(HttpClientResponse.schemaBodyJson(Bundle)),
+          // The connection's credentials must not follow a redirect to another server.
+          Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
+          Effect.scoped,
+          Effect.timeout("30 seconds"),
+        )
+      if (bundle.slug !== input.slug)
+        return yield* Effect.fail(new Error(`expected skill ${input.slug}, received ${bundle.slug}`))
+      const unsafe = bundle.files.find((file) => {
+        const destination = path.resolve(input.root, file.path)
+        return (
+          !SkillDiscovery.isSafeRelativePath(file.path) ||
+          file.path.toLowerCase() === ".opencode-version" ||
+          !FSUtil.contains(input.root, destination) ||
+          destination === input.root
+        )
+      })
+      if (unsafe) return yield* Effect.fail(new Error(`unsafe skill file path: ${unsafe.path}`))
+      if (!bundle.files.some((file) => file.path === "SKILL.md"))
+        return yield* Effect.fail(new Error(`skill ${input.slug} has no SKILL.md`))
+      const staging = `${input.root}.tmp-${crypto.randomUUID()}`
+      yield* Effect.gen(function* () {
+        yield* Effect.forEach(
+          bundle.files,
+          (file) => fs.writeWithDirs(path.resolve(staging, file.path), file.content),
+          { discard: true },
+        )
+        yield* fs.writeFileString(path.join(staging, ".opencode-version"), bundle.version)
+        yield* SkillDiscovery.replace(fs, input.root, staging)
+      }).pipe(Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)))
+    })
+
     const refresh = Effect.fn("ConfigSkillPlugin.refresh")(
       function* (file?: string) {
         yield* FiberMap.clear(watches)
@@ -179,6 +298,8 @@ export const Plugin = define({
         for (const source of current) {
           for (const skill of yield* load(source)) skills.set(skill.id, skill)
         }
+        // Console skills load last, so they win over local skills with the same ID.
+        for (const skill of yield* library()) skills.set(skill.id, skill)
         loaded.skills = Array.from(skills.values())
         if (file) {
           yield* Effect.logInfo("skills rescanned", {

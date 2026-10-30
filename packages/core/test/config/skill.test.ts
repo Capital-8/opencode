@@ -2,6 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { FetchHttpClient } from "effect/http"
 import { Config } from "@opencode/core/config"
 import { ConfigIntegration } from "@opencode/core/config/integration"
 import { Directory, Document, type Entry, Info } from "@opencode/schema/config"
@@ -25,15 +26,15 @@ import { WellKnown } from "@opencode/core/wellknown"
 import { emptyCredentialNode, emptyWellknownNode } from "../fixture/config-nodes"
 import { advance, drain } from "../lib/clock"
 import { tmpdir } from "../fixture/tmpdir"
+import { registerIntegrationPolicy } from "../fixture/policy"
 import { location } from "../fixture/location"
 import { testEffect } from "../lib/effect"
 import { host } from "../plugin/host"
 
 const emptyDiscovery = SkillDiscovery.Service.of({ pull: () => Effect.succeed([]) })
 const watcherLayer = Watcher.testLayer
-const it = testEffect(
-  Layer.merge(AppNodeBuilder.build(LayerNode.group([Skill.node, Bus.node, FSUtil.node])), watcherLayer),
-)
+const skillLayer = Layer.merge(AppNodeBuilder.build(LayerNode.group([Skill.node, Bus.node, FSUtil.node])), watcherLayer)
+const it = testEffect(skillLayer)
 const decode = Schema.decodeUnknownSync(Info)
 
 function write(directory: string, name: string, description: string) {
@@ -56,11 +57,11 @@ const startEntries = Effect.fnUntraced(function* (
     claude: [],
     agents: [],
   },
-  overrides: Parameters<typeof host>[0] = {},
+  options: { readonly cache?: string; readonly host?: Parameters<typeof host>[0] } = {},
 ) {
   const service = yield* Skill.Service
   const pluginHost = host({
-    ...overrides,
+    ...options.host,
     skill: {
       list: () => Effect.die("unused skill.list"),
       transform: service.transform,
@@ -73,11 +74,87 @@ const startEntries = Effect.fnUntraced(function* (
   yield* ConfigSkillPlugin.Plugin.effect(pluginHost).pipe(
     Effect.provide(Config.testLayer(entries, compatibility)),
     Effect.provideService(SkillDiscovery.Service, discovery),
-    Effect.provideService(Global.Service, Global.Service.of({ ...Global.make(), home })),
+    Effect.provideService(
+      Global.Service,
+      Global.Service.of({ ...Global.make(), home, ...(options.cache ? { cache: options.cache } : {}) }),
+    ),
     Effect.provideService(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(directory) }))),
+    Effect.provide(FetchHttpClient.layer),
   )
   return service
 })
+
+// A Console server for Library skill bundles that records each request. `respond` is replaced per phase.
+const consoleServer = Effect.acquireRelease(
+  Effect.sync(() => {
+    const state = {
+      respond: (_request: Request): Response => new Response(null, { status: 404 }),
+      requests: [] as { path: string; authorization: string | null; orgID: string | null; userAgent: string | null }[],
+    }
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        state.requests.push({
+          path: new URL(request.url).pathname,
+          authorization: request.headers.get("authorization"),
+          orgID: request.headers.get("x-org-id"),
+          userAgent: request.headers.get("user-agent"),
+        })
+        return state.respond(request)
+      },
+    })
+    return { origin: server.url.origin, state, server }
+  }),
+  (fixture) => Effect.promise(() => fixture.server.stop(true)),
+)
+
+const bundle = (slug: string, version: string, files: Record<string, string>) =>
+  Response.json({ slug, version, files: Object.entries(files).map(([path, content]) => ({ path, content })) })
+
+const skillFile = (name: string, description: string) =>
+  `---\nname: ${name}\ndescription: ${description}\n---\n# ${name}`
+
+const consoleDocument = (origin: string, skills: ConfigIntegration.Library["skills"]) =>
+  ConfigIntegration.make({
+    integrationID: Integration.ID.make("opencode"),
+    connection: { type: "credential", id: Credential.ID.make("cred_console"), label: "Acme", method: "key" },
+    origin,
+    info: { library: { skills } },
+  })
+
+const consoleHost = (): Parameters<typeof host>[0] => {
+  const integration = host().integration
+  return {
+    integration: {
+      ...integration,
+      connection: {
+        ...integration.connection,
+        resolve: () =>
+          Effect.succeed(Credential.Key.make({ type: "key", key: "secret", metadata: { orgID: "org_acme" } })),
+      },
+    },
+  }
+}
+
+// Each call starts a fresh plugin and skill catalog over the same cache, as a new session would.
+const loadConsole = (input: {
+  readonly root: string
+  readonly origin: string
+  readonly skills: ConfigIntegration.Library["skills"]
+  readonly entries?: Entry[]
+  readonly compatibility?: { readonly claude: readonly AbsolutePath[]; readonly agents: readonly AbsolutePath[] }
+}) =>
+  Effect.gen(function* () {
+    const skill = yield* startEntries(
+      [...(input.entries ?? []), consoleDocument(input.origin, input.skills)],
+      input.root,
+      input.root,
+      emptyDiscovery,
+      input.compatibility,
+      { cache: path.join(input.root, "cache"), host: consoleHost() },
+    )
+    return yield* skill.list()
+  }).pipe(Effect.scoped, Effect.provide(skillLayer))
 
 const start = (skills: string[], directory: string, discovery = emptyDiscovery) =>
   startEntries(
@@ -289,65 +366,6 @@ describe("ConfigSkillPlugin.Plugin", () => {
     ),
   )
 
-  it.live("pulls Console skill catalogs with the connection's credentials and cache, and others without", () =>
-    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
-      Effect.flatMap((tmp) =>
-        Effect.gen(function* () {
-          const library = "https://console.example.test/console/api/v2/library/skills/#v=abc"
-          const remote = "https://example.test/skills/"
-          const pulls: { url: string; headers?: Record<string, string>; scope?: string }[] = []
-          const discovery = SkillDiscovery.Service.of({
-            pull: (url, headers, scope) => {
-              pulls.push({ url, headers, scope })
-              return Effect.succeed([])
-            },
-          })
-          const integration = host().integration
-          yield* startEntries(
-            [
-              new Document({ type: "document", info: decode({ skills: [remote] }) }),
-              ConfigIntegration.make({
-                integrationID: Integration.ID.make("opencode"),
-                connection: {
-                  type: "credential",
-                  id: Credential.ID.make("cred_console"),
-                  label: "Acme",
-                  method: "key",
-                },
-                origin: "https://console.example.test/console",
-                info: { skills: [library] },
-              }),
-            ],
-            tmp.path,
-            tmp.path,
-            discovery,
-            undefined,
-            {
-              integration: {
-                ...integration,
-                connection: {
-                  ...integration.connection,
-                  resolve: () =>
-                    Effect.succeed(
-                      Credential.Key.make({ type: "key", key: "secret", metadata: { orgID: "org_acme" } }),
-                    ),
-                },
-              },
-            },
-          )
-          expect(pulls).toEqual([
-            { url: remote, headers: undefined, scope: undefined },
-            {
-              url: library,
-              headers: { authorization: "Bearer secret", "x-org-id": "org_acme" },
-              scope: JSON.stringify(["opencode", "cred_console", "org_acme"]),
-            },
-          ])
-        }),
-      ),
-    ),
-  )
-
   it.live("keeps directory skills when a URL source fails", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) =>
@@ -537,6 +555,266 @@ describe("ConfigSkillPlugin.Plugin", () => {
             }),
           ),
         ),
+      ),
+    ),
+  )
+})
+
+describe("ConfigSkillPlugin.Plugin with Console Library skills", () => {
+  it.live("loads a Console skill over same-ID local and compatibility skills", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          const local = path.join(tmp.path, "local")
+          const claude = path.join(tmp.path, "claude")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(local, "review"), { recursive: true })
+            await fs.mkdir(path.join(claude, "skills", "review"), { recursive: true })
+            await write(local, "review", "Local")
+            await write(path.join(claude, "skills"), "review", "Compatibility")
+          })
+          console.state.respond = () =>
+            bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Console"), "references/style.md": "Style" })
+
+          const review = (yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+            entries: [new Document({ type: "document", info: decode({ skills: [local] }) })],
+            compatibility: { claude: [AbsolutePath.make(claude)], agents: [] },
+          })).find((item) => item.id === "review")
+
+          expect(review?.description).toBe("Console")
+          expect(review?.path.startsWith(path.join(tmp.path, "cache", "skills"))).toBe(true)
+          expect(
+            yield* Effect.promise(() => Bun.file(path.join(path.dirname(review!.path), "references/style.md")).text()),
+          ).toBe("Style")
+        }),
+      ),
+    ),
+  )
+
+  it.live("downloads a skill bundle with the Console connection's headers", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Console") })
+
+          yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+          })
+
+          expect(console.state.requests).toEqual([
+            {
+              path: "/api/v2/library/skills/review",
+              authorization: "Bearer secret",
+              orgID: "org_acme",
+              userAgent: "opencode/test/test/test",
+            },
+          ])
+        }),
+      ),
+    ),
+  )
+
+  it.live("lets a skill.use deny remove a Console skill", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Console") })
+          const entries = [
+            new Document({
+              type: "document",
+              info: decode({ policies: [{ action: "skill.use", resource: "review", effect: "deny" }] }),
+            }),
+            consoleDocument(console.origin, [{ slug: "review", version: "skl_1:1" }]),
+          ]
+
+          const skill = yield* startEntries(entries, tmp.path, tmp.path, emptyDiscovery, undefined, {
+            cache: path.join(tmp.path, "cache"),
+            host: consoleHost(),
+          })
+          expect((yield* skill.list()).map((item) => item.id)).toEqual([Skill.ID.make("review")])
+          yield* registerIntegrationPolicy({ skill }).pipe(Effect.provide(Config.testLayer(entries)))
+          expect(yield* skill.list()).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("reads a manual-only Console skill without a description", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () =>
+            bundle("manual", "skl_1:1", {
+              "SKILL.md": "---\nname: Manual\nmetadata:\n  opencode/autoinvoke: false\n---\n# Manual",
+            })
+
+          const skills = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "manual", version: "skl_1:1" }],
+          })
+
+          expect(skills).toHaveLength(1)
+          expect(skills[0]).toMatchObject({ id: "manual", name: "Manual", autoinvoke: false, content: "# Manual" })
+          expect(skills[0]?.description).toBeUndefined()
+        }),
+      ),
+    ),
+  )
+
+  it.live("downloads each version once, and again only when its SKILL.md is missing", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Console") })
+          const load = Effect.gen(function* () {
+            console.state.requests = []
+            const skills = yield* loadConsole({
+              root: tmp.path,
+              origin: console.origin,
+              skills: [{ slug: "review", version: "skl_1:1" }],
+            })
+            return { skills: skills.map((item) => item.id), requests: console.state.requests.length }
+          })
+
+          const first = yield* load
+          expect(first).toEqual({ skills: [Skill.ID.make("review")], requests: 1 })
+          expect(yield* load).toEqual({ skills: [Skill.ID.make("review")], requests: 0 })
+
+          const cached = yield* Effect.promise(() =>
+            Array.fromAsync(new Bun.Glob("cache/skills/*/review/SKILL.md").scan({ cwd: tmp.path, absolute: true })),
+          )
+          expect(cached).toHaveLength(1)
+          yield* Effect.promise(() => fs.rm(cached[0]!))
+          expect(yield* load).toEqual({ skills: [Skill.ID.make("review")], requests: 1 })
+        }),
+      ),
+    ),
+  )
+
+  it.live("keeps the cached version when a newer version fails to download", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = () => bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "First") })
+          yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+          })
+
+          console.state.respond = () => new Response("unavailable", { status: 503 })
+          const skills = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:2" }],
+          })
+
+          expect(console.state.requests).toHaveLength(2)
+          expect(skills.map((item) => item.description)).toEqual(["First"])
+        }),
+      ),
+    ),
+  )
+
+  it.live("drops a skill the Console stops listing though its files stay cached", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = (request) =>
+            new URL(request.url).pathname.endsWith("/review")
+              ? bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Review") })
+              : bundle("deploy", "skl_2:1", { "SKILL.md": skillFile("deploy", "Deploy") })
+          const listed = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [
+              { slug: "review", version: "skl_1:1" },
+              { slug: "deploy", version: "skl_2:1" },
+            ],
+          })
+          expect(listed.map((item) => item.id).toSorted()).toEqual([Skill.ID.make("deploy"), Skill.ID.make("review")])
+
+          const remaining = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "deploy", version: "skl_2:1" }],
+          })
+
+          expect(remaining.map((item) => item.id)).toEqual([Skill.ID.make("deploy")])
+          const review = listed.find((item) => item.id === "review")
+          expect(yield* Effect.promise(() => Bun.file(review!.path).exists())).toBe(true)
+        }),
+      ),
+    ),
+  )
+
+  it.live("rejects bundles with unsafe file paths", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          const unsafe: Record<string, string> = {
+            parent: "../escape.md",
+            nested: "references/../../escape.md",
+            absolute: path.join(tmp.path, "escape.md"),
+            backslash: "references\\..\\..\\escape.md",
+            version: ".opencode-version",
+          }
+          console.state.respond = (request) => {
+            const slug = path.basename(new URL(request.url).pathname)
+            return bundle(slug, "skl_1:1", { "SKILL.md": skillFile(slug, "Unsafe"), [unsafe[slug]!]: "escaped" })
+          }
+
+          const skills = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: Object.keys(unsafe).map((slug) => ({ slug, version: "skl_1:1" })),
+          })
+
+          expect(console.state.requests).toHaveLength(Object.keys(unsafe).length)
+          expect(skills).toEqual([])
+          expect(
+            yield* Effect.promise(() =>
+              Array.fromAsync(new Bun.Glob("**/escape.md").scan({ cwd: tmp.path, dot: true })),
+            ),
+          ).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("refuses to follow a redirect with the connection's credentials", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const console = yield* consoleServer
+          console.state.respond = (request) =>
+            new URL(request.url).pathname === "/elsewhere"
+              ? bundle("review", "skl_1:1", { "SKILL.md": skillFile("review", "Redirected") })
+              : new Response(null, { status: 302, headers: { location: "/elsewhere" } })
+
+          const skills = yield* loadConsole({
+            root: tmp.path,
+            origin: console.origin,
+            skills: [{ slug: "review", version: "skl_1:1" }],
+          })
+
+          expect(skills).toEqual([])
+          expect(console.state.requests.map((request) => request.path)).toEqual(["/api/v2/library/skills/review"])
+        }),
       ),
     ),
   )

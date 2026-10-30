@@ -160,7 +160,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       remote: ConfigIntegration.Remote | undefined
       connection: ActiveConnection
       organization: string | undefined
-      // The Console server the config came from; its instruction and skill URLs must be under it.
+      // The Console server the config came from, which serves its Library's skill files.
       origin: string | undefined
     } = { remote: undefined, connection: undefined, organization: undefined, origin: undefined }
     // Status last reported for the active connection, so inference failures can name the fix.
@@ -387,12 +387,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
     const guard = Effect.fn("OpencodePlugin.guard")(function* (next: typeof snapshot) {
       yield* Effect.forEach(explainers, (registration) => registration.dispose, { discard: true })
       explainers = yield* Effect.forEach(
-        next.connection
-          ? new Set([
-              Provider.ID.opencode,
-              ...Object.keys(next.remote?.providers ?? {}),
-            ])
-          : [],
+        next.connection ? new Set([Provider.ID.opencode, ...Object.keys(next.remote?.providers ?? {})]) : [],
         (providerID) => ctx.session.hook("http.response", explain, { providerID }).pipe(Scope.provide(scope)),
       )
     })

@@ -341,7 +341,11 @@ export const layer = (options?: Options) =>
             Effect.map((allowed) =>
               allowed
                 ? document
-                : new ConfigIntegration.Document({ ...document, info: new Info({ policies: document.info.policies }) }),
+                : new ConfigIntegration.Document({
+                    ...document,
+                    library: undefined,
+                    info: new Info({ policies: document.info.policies }),
+                  }),
             ),
           ),
         )

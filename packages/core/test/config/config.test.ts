@@ -562,7 +562,7 @@ describe("Config", () => {
     ),
   )
 
-  it.live("keeps only the policies of documents from integrations managed policy denies", () =>
+  it.live("keeps only the policies of documents from integrations managed policy denies, without their library", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) => {
         const system = path.join(tmp.path, "system")
@@ -605,10 +605,17 @@ describe("Config", () => {
           }),
           deps: [],
         })
+        const library = { instructions: [{ id: "ins_1", name: "Standards", content: "Be kind" }] }
         const supplied = (entries: readonly Entry[]) =>
           entries.flatMap((entry) =>
             entry.type === "document" && !entry.path
-              ? [{ servers: Object.keys(entry.info.mcp?.servers ?? {}), policies: entry.info.policies?.length ?? 0 }]
+              ? [
+                  {
+                    servers: Object.keys(entry.info.mcp?.servers ?? {}),
+                    policies: entry.info.policies?.length ?? 0,
+                    library: entry instanceof ConfigIntegration.Document ? entry.library : undefined,
+                  },
+                ]
               : [],
           )
         return Effect.promise(() =>
@@ -634,24 +641,27 @@ describe("Config", () => {
                     integrationID: opencode,
                     connection: { type: "credential", id: credentialID, label: "Console", method: "key" },
                     organization: org,
-                    info: decodeInfo({
-                      mcp: { servers: { docs: { type: "remote", url: "https://docs.acme.com/mcp" } } },
-                      policies: [{ action: "mcp.use", resource: "github", effect: "deny" }],
-                    }),
+                    info: {
+                      ...decodeInfo({
+                        mcp: { servers: { docs: { type: "remote", url: "https://docs.acme.com/mcp" } } },
+                        policies: [{ action: "mcp.use", resource: "github", effect: "deny" }],
+                      }),
+                      library,
+                    },
                   }),
                 )
               yield* install()
               // The personal account's servers and the denied well-known origin's config are gone; their policies stay.
               expect(supplied(yield* config.entries())).toEqual([
-                { servers: [], policies: 1 },
-                { servers: [], policies: 1 },
+                { servers: [], policies: 1, library: undefined },
+                { servers: [], policies: 1, library: undefined },
               ])
               org = allowed
               yield* config.integration!(opencode, undefined)
               yield* install()
               expect(supplied(yield* config.entries())).toEqual([
-                { servers: ["docs"], policies: 1 },
-                { servers: [], policies: 1 },
+                { servers: ["docs"], policies: 1, library },
+                { servers: [], policies: 1, library: undefined },
               ])
             }).pipe(
               Effect.provide(
