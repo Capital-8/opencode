@@ -289,7 +289,11 @@ const layer = Layer.effect(
           prepared: {
             ...prepared,
             // A tool call can arrive during a reload; its permission check reads the session's agent.
-            executeTool: (call) => plugins.awaitActivation.pipe(Effect.andThen(prepared.executeTool(call))),
+            executeTool: (call) =>
+              plugins.awaitActivation.pipe(
+                Effect.andThen(prepared.executeTool(call)),
+                Effect.provideService(Job.Service, jobs),
+              ),
           },
           retry: (cause, error, proposed) =>
             retry.decide({

@@ -28,6 +28,13 @@ export const outstanding = Effect.fnUntraced(function* (
       }
     if (recovery.kind === "image")
       return { kind: "image" as const, sessionID: recovery.sessionID, path: recovery.path, model: recovery.model }
+    if (recovery.kind === "tool")
+      return {
+        kind: "tool" as const,
+        sessionID: recovery.sessionID,
+        tool: recovery.tool,
+        ...(recovery.title !== undefined ? { title: recovery.title } : {}),
+      }
     return {
       kind: "subagent" as const,
       sessionID: recovery.parentSessionID,

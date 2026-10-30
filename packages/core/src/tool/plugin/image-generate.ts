@@ -6,19 +6,17 @@ import type { Context } from "@opencode/plugin/effect/plugin"
 import type { Document, Entry } from "@opencode/schema/config"
 import { Identifier } from "@opencode/schema/identifier"
 import { Global } from "@opencode/util/global"
-import { Duration, Effect, Schema, Scope, Stream } from "effect"
+import { Duration, Effect, Schema, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Config } from "../../config.js"
 import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import { Environment } from "../../environment/index.js"
 import { FileAccess } from "../../file-access.js"
 import { Generate } from "../../generate.js"
-import { ImageNotice } from "../../image/notice.js"
 import { Job } from "../../job.js"
 import { Mime } from "../../mime.js"
 import { Model } from "../../model.js"
 import { Permission } from "../../permission.js"
-import { Session } from "../../session.js"
 import { SessionMessage } from "../../session/message.js"
 import { SessionSchema } from "../../session/schema.js"
 import { collectBoundedResponseBody } from "../http-body.js"
@@ -81,8 +79,6 @@ export const Plugin = {
     const http = yield* HttpClient.HttpClient
     const config = yield* Config.Service
     const jobs = yield* Job.Service
-    const scope = yield* Scope.Scope
-    const sessions = yield* Session.Service
     const models = yield* Model.Service
     const permission = yield* Permission.Service
 
@@ -199,31 +195,6 @@ export const Plugin = {
       return (yield* environment.files.read(target.absolute)).bytes
     })
 
-    const notifyWhenDone = Effect.fn("ImageGenerateTool.notifyWhenDone")(
-      function* (input: { sessionID: SessionSchema.ID; id: string; notificationID: SessionMessage.ID; file: string }) {
-        const info = (yield* jobs.wait({ id: input.id })).info
-        if (!info || info.status === "running") return
-        yield* sessions.synthetic({
-          id: input.notificationID,
-          sessionID: input.sessionID,
-          description: "Image generation",
-          text: ImageNotice.text({
-            id: input.id,
-            state: info.status,
-            body:
-              info.status === "completed"
-                ? (info.output ?? "")
-                : info.status === "error"
-                  ? (info.error ?? `Image request failed for ${input.file}.`)
-                  : `Image request for ${input.file} was cancelled.`,
-          }),
-          metadata: { source: name, jobID: input.id, state: info.status, path: input.file },
-        })
-        yield* jobs.completeBackground(input.notificationID)
-      },
-      Effect.forkIn(scope, { startImmediately: true }),
-    )
-
     // On by default. `experimental.image_generate: false` is still honored for configs from when the tool was opt-in;
     // permissions are the supported way to turn it off. Internal plugins are not re-run on config changes, so reload the
     // tool transform instead.
@@ -251,7 +222,7 @@ export const Plugin = {
         if (!enabled || imageGenerate(loaded.entries) === false) return
         editor.add({
           name,
-          options: { codemode: false },
+          options: { codemode: false, background: false },
           description,
           input: Input,
           output: Output,
@@ -354,6 +325,7 @@ export const Plugin = {
               const notificationID = SessionMessage.ID.create()
               yield* jobs.start({
                 id,
+                sessionID: context.sessionID,
                 notificationID,
                 type: name,
                 title: input.prompt,
@@ -362,7 +334,6 @@ export const Plugin = {
                 run,
               })
               yield* jobs.background(id)
-              yield* notifyWhenDone({ sessionID: context.sessionID, id, notificationID, file: stem })
               return {
                 output: { id, path: stem, model: ref },
                 content: [

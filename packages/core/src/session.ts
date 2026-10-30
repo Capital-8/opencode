@@ -534,6 +534,15 @@ const layer = Layer.effect(
       },
     })
 
+    yield* jobs.registerNotifier((sessionID, notice) =>
+      result
+        .synthetic({
+          sessionID,
+          ...notice,
+        })
+        .pipe(Effect.ignore),
+    )
+
     return result
   }),
 )
