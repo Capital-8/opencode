@@ -1,5 +1,4 @@
 import type { SessionInfo } from "@opencode/client/promise"
-import { sessionLabel } from "@/session/title"
 import type { ServerCtx } from "@/runtime/server/runtime"
 import type { Platform } from "@/runtime/platform/platform"
 import { VoiceGates } from "./gates"
@@ -8,6 +7,7 @@ import { VoiceTools } from "./tools"
 import { VoiceFailure, VoiceTransport } from "./transport"
 import { delegatorInstructions } from "./spec"
 import type { ToolCall, VoiceEvent } from "./protocol"
+import { viewTitle, type VoiceView } from "./view"
 
 export type CallState = {
   status: "idle" | "connecting" | "connected" | "dropped"
@@ -21,10 +21,14 @@ export type CallState = {
   title: string
 }
 
+function viewing(view: VoiceView) {
+  return view.type === "session" ? { session: view.session } : { directory: view.directory }
+}
+
 /** A call's own bookkeeping, outside the reactive state the screen reads. */
 type CallRuntime = {
   transport?: VoiceTransport
-  viewing: SessionInfo
+  viewing: VoiceView
   muted: boolean
   ended: boolean
   watching: boolean
@@ -34,7 +38,8 @@ type CallRuntime = {
 
 type Delegation = {
   id: string
-  sessionID: string
+  /** The session on screen when it was asked; none while the call is still on its draft. */
+  sessionID?: string
   transcript: string[]
   calls: ToolCall[]
   rounds: number
@@ -43,7 +48,7 @@ type Delegation = {
 
 export function createVoiceCall(input: {
   ctx: ServerCtx
-  session: SessionInfo
+  view: VoiceView
   platform: Platform
   /** Shows the session on screen; rejects unless the route really changed. */
   open: (session: SessionInfo, signal: AbortSignal) => Promise<void>
@@ -61,13 +66,14 @@ export function createVoiceCall(input: {
       await input.open(session, signal)
       // A call that ended or dropped mid-open must not take over the view.
       signal.throwIfAborted()
-      view(session)
+      view({ type: "session", session })
     },
     tabs: input.tabs,
+    draft: () => (state.viewing.type === "draft" ? state.viewing.session() : undefined),
   })
 
   const state: CallRuntime = {
-    viewing: input.session,
+    viewing: input.view,
     muted: false,
     ended: false,
     watching: false,
@@ -86,16 +92,16 @@ export function createVoiceCall(input: {
 
   let updates = Promise.resolve()
 
-  function view(session: SessionInfo) {
-    state.viewing = session
-    input.change({ title: sessionLabel(session) })
+  function view(next: VoiceView) {
+    state.viewing = next
+    input.change({ title: viewTitle(next) })
     const transport = state.transport
 
     if (!state.ready || !transport) return
     updates = updates
       .then(async () => {
         if (transport !== state.transport || transport.abort.signal.aborted) return
-        await transport.instructions(delegatorInstructions(state.viewing, tail.lines))
+        await transport.instructions(delegatorInstructions(viewing(state.viewing), tail.lines))
       })
       .catch(() => {
         if (transport === state.transport && !transport.abort.signal.aborted) drop("connection")
@@ -155,7 +161,7 @@ export function createVoiceCall(input: {
     transport.abort.signal.throwIfAborted()
     await input.platform.setVoiceCallActive?.(true)
     transport.abort.signal.throwIfAborted()
-    await transport.join(state.viewing, tail.lines)
+    await transport.join(viewing(state.viewing), tail.lines)
     transport.abort.signal.throwIfAborted()
     state.ready = true
     transport.mute(state.muted)
@@ -182,7 +188,13 @@ export function createVoiceCall(input: {
       const id = event.delegation.id
 
       if (delegations.has(id)) return
-      delegations.set(id, { id, sessionID: state.viewing.id, transcript: tail.capture(id), calls: [], rounds: 0 })
+      delegations.set(id, {
+        id,
+        sessionID: state.viewing.type === "session" ? state.viewing.session.id : undefined,
+        transcript: tail.capture(id),
+        calls: [],
+        rounds: 0,
+      })
 
       return
     }

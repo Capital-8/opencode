@@ -7,7 +7,7 @@ import { makeEventListener } from "@solid-primitives/event-listener"
 import { useNavigate } from "@solidjs/router"
 import { createEffect, createMemo, on, onCleanup, onMount, Show, type Accessor } from "solid-js"
 import { Composer } from "@/composer/composer"
-import { useVoiceSession, VoiceCallButton, VoiceCallControls, VoiceCallStrip, VoiceComposer } from "@/voice/composer"
+import { useVoiceScreen, VoiceCallButton, VoiceCallControls, VoiceCallStrip, VoiceComposer } from "@/voice/composer"
 import { useComposerState } from "@/composer/persistence"
 import { createComposerControls } from "@/composer/selection"
 import { setCursorPosition } from "@/composer/editor/dom"
@@ -402,7 +402,19 @@ export function ActiveSessionComposerRegion(props: {
   const server = useServerSDK()
   const language = useLanguage()
   const openRoute = useOpenSessionRoute()
-  const voiceActive = useVoiceSession(() => props.session.data.info())
+
+  // The call hears of a move or a rename, not of every update to the session.
+  const voiceView = createMemo(
+    () => {
+      const session = props.session.data.info()
+
+      return session ? { type: "session" as const, session } : undefined
+    },
+    undefined,
+    { equals: (a, b) => a?.session.id === b?.session.id && a?.session.title === b?.session.title },
+  )
+
+  const voiceActive = useVoiceScreen(voiceView)
 
   // Whether the composer is what the region shows, the face SessionComposerRegion picks, as opposed to a docked
   // request, a subagent's bar or a missing location.
@@ -597,7 +609,7 @@ export function ActiveSessionComposerRegion(props: {
                   borderUnderlay
                   readOnly={props.model.queue.undoing()}
                   suggestionBoundary={props.suggestionBoundary}
-                  action={<VoiceCallButton session={props.session.data.info()} />}
+                  action={<VoiceCallButton view={voiceView()} />}
                   controls={voiceActive() ? VoiceCallControls : undefined}
                 />
               </VoiceComposer>

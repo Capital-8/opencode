@@ -3,13 +3,13 @@ import { Icon } from "@opencode/ui/icon"
 import { IconButton } from "@opencode/ui/icon-button"
 import { Tooltip } from "@opencode/ui/tooltip"
 import { createEffect, createSignal, For, onCleanup, Show, type ParentProps } from "solid-js"
-import type { SessionInfo } from "@opencode/client/promise"
 import { useServer } from "@/runtime/server/current"
 import { useLanguage } from "@/runtime/i18n/language"
 import { useSettings } from "@/settings/model"
 import { useVoice } from "./context"
 import type { CallState } from "./call"
 import { VoiceScope } from "./scope"
+import type { VoiceView } from "./view"
 import "./voice.css"
 
 /** Whether this server has a call to show, connecting, live or dropped. */
@@ -21,16 +21,17 @@ export function useVoiceCallActive() {
 }
 
 /**
- * The session screen's part in a call on its server: the call follows the session on screen (subagents and sessions
- * waiting on a request included), and while this screen is up the floating call steps aside.
+ * A screen's part in a call on its server, a session's or a new-session draft's: the call follows what's on screen
+ * (subagents, sessions waiting on a request and drafts included), and while this screen is up the floating call steps
+ * aside.
  */
-export function useVoiceSession(session: () => SessionInfo | undefined) {
+export function useVoiceScreen(view: () => VoiceView | undefined) {
   const voice = useVoice()
   const server = useServer()
   const active = useVoiceCallActive()
 
   createEffect(() => {
-    const current = session()
+    const current = view()
 
     if (current && voice.state.server === server.key) voice.view(server.key, current)
   })
@@ -139,15 +140,18 @@ export function VoiceCallPill() {
   )
 }
 
-/** The composer's call button, beside Send. */
-export function VoiceCallButton(props: { session: SessionInfo | undefined }) {
+/**
+ * The composer's call button, beside Send. Without a view (a draft with no project yet), `onUnavailable` runs instead,
+ * such as opening the project picker.
+ */
+export function VoiceCallButton(props: { view: VoiceView | undefined; onUnavailable?: () => void }) {
   const voice = useVoice()
   const server = useServer()
   const settings = useSettings()
   const language = useLanguage()
 
   return (
-    <Show when={settings.general.voice() && props.session && voice.state.status === "idle"}>
+    <Show when={settings.general.voice() && (props.view || props.onUnavailable) && voice.state.status === "idle"}>
       <Tooltip placement="top" value={language.t("voice.call")}>
         <IconButton
           data-action="composer-voice-call"
@@ -159,9 +163,10 @@ export function VoiceCallButton(props: { session: SessionInfo | undefined }) {
           aria-label={language.t("voice.call")}
           onMouseDown={(event: MouseEvent) => event.preventDefault()}
           onClick={() => {
-            const session = props.session
+            const view = props.view
 
-            if (session) voice.begin(server.key, server.ctx, session)
+            if (view) voice.begin(server.key, server.ctx, view)
+            else props.onUnavailable?.()
           }}
         />
       </Tooltip>
