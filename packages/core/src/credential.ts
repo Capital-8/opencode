@@ -1,7 +1,7 @@
 export * as Credential from "./credential.js"
 
 import { asc, desc, eq } from "drizzle-orm"
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Context, Effect, Fiber, Layer, Schema, Semaphore } from "effect"
 import { Credential } from "@opencode/schema/credential"
 import { CredentialLegacy } from "@opencode/schema/credential-legacy"
 import { Integration } from "@opencode/schema/integration"
@@ -103,15 +103,12 @@ const layer = Layer.effect(
     }
 
     let cached: Snapshot | undefined
-    let inflight:
-      | { readonly deferred: Deferred.Deferred<Snapshot>; readonly dataVersion: number | undefined }
-      | undefined
     let generation = 0
+    const loadLock = yield* Semaphore.make(1)
 
     const invalidate = () => {
       generation += 1
       cached = undefined
-      inflight = undefined
     }
 
     // `PRAGMA data_version` increments when another SQLite connection commits to the same database file,
@@ -137,42 +134,26 @@ const layer = Layer.effect(
       return { all: items, byID, byIntegration, dataVersion }
     }
 
-    const snapshot = () =>
-      Effect.uninterruptibleMask((restore) =>
+    const snapshot = Effect.fnUntraced(function* () {
+      const version = yield* readDataVersion()
+      if (cached && cached.dataVersion === version) return cached
+      return yield* loadLock.withPermits(1)(
         Effect.gen(function* () {
-          const version = yield* restore(readDataVersion())
-          if (cached && cached.dataVersion === version) return cached
-          if (inflight && inflight.dataVersion === version) return yield* restore(Deferred.await(inflight.deferred))
-
+          const currentVersion = yield* readDataVersion()
+          if (cached && cached.dataVersion === currentVersion) return cached
           const targetGeneration = generation
-          const deferred = yield* Deferred.make<Snapshot>()
-          const current = { deferred, dataVersion: version }
-          inflight = current
-
-          yield* db
+          const rows = yield* db
             .select()
             .from(CredentialTable)
             .orderBy(asc(CredentialTable.active), asc(CredentialTable.time_created), asc(CredentialTable.id))
             .all()
-            .pipe(
-              Effect.orDie,
-              Effect.map((rows) => buildSnapshot(storedRows(rows), version)),
-              Effect.exit,
-              Effect.flatMap((exit) =>
-                Effect.sync(() => {
-                  if (inflight === current) inflight = undefined
-                  if (Exit.isSuccess(exit) && generation === targetGeneration) {
-                    cached = exit.value
-                  }
-                }).pipe(Effect.andThen(Deferred.done(deferred, exit))),
-              ),
-              Effect.uninterruptible,
-              Effect.forkIn(scope),
-            )
-
-          return yield* restore(Deferred.await(deferred))
+            .pipe(Effect.orDie)
+          const next = buildSnapshot(storedRows(rows), currentVersion)
+          if (generation === targetGeneration) cached = next
+          return next
         }),
       )
+    })
 
     return Service.of({
       lock: Effect.fn("Credential.lock")((id, operation) =>
