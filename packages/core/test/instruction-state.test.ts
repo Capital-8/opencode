@@ -234,22 +234,22 @@ describe("InstructionState", () => {
       const sessionID = SessionSchema.ID.make("ses_instruction_reorder")
       const { db, events } = yield* setup(sessionID)
       const discovery = yield* InstructionDiscovery.Service
-      const required = new InstructionDiscovery.File({ path: "OpenCode Console instruction ins_1", content: "one" })
-      const optional = new InstructionDiscovery.File({ path: "OpenCode Console instruction ins_2", content: "two" })
+      const first = new InstructionDiscovery.File({ path: "/instructions/first.md", content: "one" })
+      const second = new InstructionDiscovery.File({ path: "/instructions/second.md", content: "two" })
       const arrange = (files: InstructionDiscovery.File[]) =>
         discovery.transform((editor) => {
           for (const file of files) editor.add(file)
         })
 
-      const first = yield* arrange([required, optional])
+      const initial = yield* arrange([first, second])
       yield* InstructionState.prepare(db, events, yield* discovery.load(), sessionID)
-      yield* first.dispose
-      yield* arrange([optional, required])
+      yield* initial.dispose
+      yield* arrange([second, first])
       yield* InstructionState.prepare(db, events, yield* discovery.load(), sessionID)
 
       expect((yield* instructionEvents(db, sessionID)).map((event) => event.data.text)).toEqual([
         undefined,
-        "The instructions now apply in this order:\n- OpenCode Console instruction ins_2\n- OpenCode Console instruction ins_1",
+        "The instructions now apply in this order:\n- /instructions/second.md\n- /instructions/first.md",
       ])
     }),
   )

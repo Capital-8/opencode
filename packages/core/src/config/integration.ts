@@ -26,26 +26,6 @@ export const Policies = Schema.Array(Schema.Unknown).pipe(
 )
 
 /**
- * The OpenCode Console's Library for the connection's workspace: instructions with their content, in the order they
- * load, and skills whose files download from the Console once per version.
- */
-export const Library = Schema.Struct({
-  instructions: Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String, content: Schema.String })).pipe(
-    Schema.optional,
-  ),
-  skills: Schema.Array(Schema.Struct({ slug: Schema.String, version: Schema.String })).pipe(Schema.optional),
-})
-export type Library = typeof Library.Type
-
-// A malformed library is dropped instead of failing the whole remote config, which would drop its policies too.
-const RemoteLibrary = Schema.Unknown.pipe(
-  Schema.decodeTo(Schema.UndefinedOr(Library), {
-    decode: SchemaGetter.transform((library) => Option.getOrUndefined(Schema.decodeUnknownOption(Library)(library))),
-    encode: SchemaGetter.passthrough({ strict: false }),
-  }),
-)
-
-/**
  * The allow-listed keys of a remote config. Only these keys are read before decoding, so a newer remote source's
  * other keys, valid or not, can never reject the document.
  */
@@ -54,7 +34,6 @@ export const Remote = Schema.Struct({
   mcp: Config.Info.fields.mcp,
   policies: Policies.pipe(Schema.optional),
   websearch: Config.Info.fields.websearch,
-  library: RemoteLibrary.pipe(Schema.optional),
 })
 export type Remote = typeof Remote.Type
 
@@ -68,12 +47,6 @@ export class Document extends Config.Document.extend<Document>("Config.Integrati
   connection: Connection.Info,
   /** Organization behind the connection, named in denials by the document's policies. */
   organization: Schema.optional(Schema.String),
-  /** Server behind the connection, without a trailing slash. The library's skill files download from it. */
-  origin: Schema.optional(Schema.String),
-  /** Workspace the connection signed in to, which scopes the library's cached skills. */
-  orgID: Schema.optional(Schema.String),
-  /** Library content the connection's workspace shares. It is not user config, so it stays out of `info`. */
-  library: Schema.optional(Library),
 }) {}
 
 /**
@@ -95,15 +68,13 @@ export function suppliers(entries: readonly Entry[]) {
 
 /**
  * Builds an integration document from the allow-listed keys of a remote config: providers, remote MCP servers,
- * policies, the web search selection, and the Library. A remote source can never load plugins, run commands, or
- * change any other local behavior through config.
+ * policies, and the web search selection. A remote source can never load plugins, run commands, or change any
+ * other local behavior through config.
  */
 export function make(input: {
   readonly integrationID: IntegrationID
   readonly connection: Connection.Info
   readonly organization?: string
-  readonly origin?: string
-  readonly orgID?: string
   readonly info: Remote
 }) {
   const servers = input.info.mcp?.servers
@@ -112,9 +83,6 @@ export function make(input: {
     integrationID: input.integrationID,
     connection: input.connection,
     organization: input.organization,
-    origin: input.origin,
-    orgID: input.orgID,
-    library: input.info.library,
     info: new Config.Info({
       providers:
         input.info.providers &&

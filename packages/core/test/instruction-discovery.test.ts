@@ -6,15 +6,12 @@ import path from "path"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
-import { ConfigIntegration } from "@opencode/core/config/integration"
 import { ConfigInstructionPlugin } from "@opencode/core/config/plugin/instruction"
-import { Credential } from "@opencode/core/credential"
-import { Integration } from "@opencode/core/integration"
 import { Watcher } from "@opencode/core/filesystem/watcher"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
-import { Document, type Entry, Info } from "@opencode/schema/config"
+import { Document, Info } from "@opencode/schema/config"
 import { Event } from "@opencode/schema/event"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
@@ -34,12 +31,11 @@ const instructionLayer = (input: {
   locationServiceLayer: Layer.Layer<Location.Service>
   filesystemLayer?: Layer.Layer<FSUtil.Service>
   instructions?: string[]
-  entries?: Entry[]
   http?: HttpClient.HttpClient
   project?: boolean
 }) => {
   const watcher = Watcher.testLayer
-  const config = Config.testLayer(input.entries ?? (input.instructions ? [configured(input.instructions)] : []))
+  const config = Config.testLayer(input.instructions ? [configured(input.instructions)] : [])
   return Layer.mergeAll(
     AppNodeBuilder.build(
       LayerNode.group([
@@ -79,13 +75,6 @@ const start = Effect.fnUntraced(function* (ctx = host()) {
 })
 
 const configured = (instructions: string[]) => new Document({ type: "document", info: new Info({ instructions }) })
-
-const consoleDocument = (instructions: { id: string; name: string; content: string }[]) =>
-  ConfigIntegration.make({
-    integrationID: Integration.ID.make("opencode"),
-    connection: { type: "credential", id: Credential.ID.make("cred_console"), label: "Acme", method: "key" },
-    info: { library: { instructions } },
-  })
 
 const readFailure = (tag: "NotFound" | "Unknown", code: string, file: string) =>
   PlatformError.systemError({
@@ -424,83 +413,6 @@ describe("ConfigInstructionPlugin.Plugin", () => {
               config: path.join(tmp.path, "global"),
               instructions: [first, remote],
               http: respond(() => responses.shift() ?? new Response(null, { status: 500 })),
-              locationServiceLayer: Layer.succeed(
-                Location.Service,
-                Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
-              ),
-            }),
-          ),
-        )
-      }),
-    ),
-  )
-
-  it.live("adds Console instructions in Console order before the global AGENTS.md, even with one name", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) => {
-        const global = path.join(tmp.path, "global")
-        return Effect.gen(function* () {
-          yield* Effect.promise(async () => {
-            await fs.mkdir(global, { recursive: true })
-            await fs.writeFile(path.join(global, "AGENTS.md"), "global")
-          })
-          const discovery = yield* start()
-          expect((yield* readInitial(yield* discovery.load())).text).toBe(
-            [
-              "Instructions from: OpenCode Console instruction ins_2\nrequired",
-              "Instructions from: OpenCode Console instruction ins_1\noptional",
-              `Instructions from: ${yield* Effect.promise(() => fs.realpath(path.join(global, "AGENTS.md")))}\nglobal`,
-            ].join("\n\n"),
-          )
-        }).pipe(
-          Effect.provide(
-            instructionLayer({
-              config: global,
-              entries: [
-                consoleDocument([
-                  { id: "ins_2", name: "Standards", content: "required" },
-                  { id: "ins_1", name: "Standards", content: "optional" },
-                ]),
-              ],
-              locationServiceLayer: Layer.succeed(
-                Location.Service,
-                Location.Service.of(location({ directory: AbsolutePath.make(path.join(tmp.path, "project")) })),
-              ),
-            }),
-          ),
-        )
-      }),
-    ),
-  )
-
-  it.live("renders an edited or renamed Console instruction as a diff", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
-      Effect.flatMap((tmp) => {
-        const content = (first: string) =>
-          [first, ...Array.from({ length: 20 }, (_, index) => `keep ${index}`)].join("\n")
-        return Effect.gen(function* () {
-          const events = yield* PubSub.unbounded<ReturnType<typeof configUpdated>>()
-          const config = yield* Config.Test
-          const discovery = yield* start(host({ event: { subscribe: () => Stream.fromPubSub(events) } }))
-          const initialized = yield* readInitial(yield* discovery.load())
-
-          yield* config.setEntries([consoleDocument([{ id: "ins_1", name: "Renamed", content: content("new") }])])
-          yield* triggerAndWait(PubSub.publish(events, configUpdated()).pipe(Effect.asVoid))
-          const update = (yield* readUpdate(yield* discovery.load(), initialized)).text
-          expect(update).toContain("The instructions from OpenCode Console instruction ins_1 changed. Here's the diff:")
-          expect(update).toContain("-old\n+new")
-          expect(update).not.toContain("no longer apply")
-        }).pipe(
-          Effect.provide(
-            instructionLayer({
-              config: path.join(tmp.path, "global"),
-              entries: [consoleDocument([{ id: "ins_1", name: "Standards", content: content("old") }])],
               locationServiceLayer: Layer.succeed(
                 Location.Service,
                 Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),

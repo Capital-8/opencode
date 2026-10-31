@@ -186,12 +186,11 @@ This MDM policy requires one Console workspace and nothing else:
 
 `/connect` offers only the Console so members can sign in. The free tier, personal
 Console accounts, other organizations, environment API keys, and providers from
-`opencode.json` are all unavailable. The workspace's providers, MCP servers, web
-search, instructions, and skills work, and changing them in the Console needs no new
-MDM profile.
+`opencode.json` are all unavailable. The workspace's providers, MCP servers, and
+web search work, and changing them in the Console needs no new MDM profile.
 
-Only managed policies can withhold the MCP servers, instructions, skills, and config
-an integration delivers; its own policies keep applying either way.
+Only managed policies can withhold the MCP servers and config an integration
+delivers; its own policies keep applying either way.
 
 A provider the connected Console workspace supplies can't be changed by user,
 project, or remote configuration: its settings, headers, models, and package come
@@ -217,7 +216,7 @@ as usual.
 ```
 
 A denied MCP server or skill is removed, and a denied plugin is not loaded, however
-it was configured or delivered, including a skill an OpenCode Console workspace shares.
+it was configured.
 
 ### Upgrading from `integration.use`
 

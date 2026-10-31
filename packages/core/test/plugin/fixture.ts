@@ -16,6 +16,7 @@ import { Global } from "@opencode/util/global"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Form } from "@opencode/core/form"
 import { Generate } from "@opencode/core/generate"
+import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { Integration } from "@opencode/core/integration"
 import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
@@ -40,6 +41,7 @@ import { Watcher } from "@opencode/core/filesystem/watcher"
 import { Tool } from "@opencode/core/tool"
 import { Vcs } from "@opencode/core/vcs"
 import { WebSearch } from "@opencode/core/websearch"
+import { WellKnown } from "@opencode/core/wellknown"
 import { Worktree } from "@opencode/core/worktree"
 import { WorktreeStrategies } from "@opencode/core/worktree/strategies"
 import { Effect, Layer } from "effect"
@@ -108,6 +110,7 @@ export const makePluginTestLayer = (permission = permissionLayer, generate = gen
       Provider.node,
       Model.node,
       Command.node,
+      InstructionDiscovery.node,
       Integration.node,
       Job.node,
       KV.node,
@@ -126,6 +129,7 @@ export const makePluginTestLayer = (permission = permissionLayer, generate = gen
       Vcs.node,
       Watcher.node,
       WebSearch.node,
+      WellKnown.node,
       Worktree.node,
       WorktreeStrategies.node,
     ]),

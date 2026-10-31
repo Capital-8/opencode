@@ -8,7 +8,6 @@ import path, { dirname, join } from "path"
 import { Effect, FiberMap, PubSub, Semaphore, Stream } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { Config } from "../../config.js"
-import { ConfigIntegration } from "../integration.js"
 import { Watcher } from "../../filesystem/watcher.js"
 import { InstructionDiscovery } from "../../instruction-discovery.js"
 import { Instructions } from "../../instructions/index.js"
@@ -41,14 +40,9 @@ export const Plugin = define({
       const stop = FSUtil.contains(home, start) ? home : root
       const globalFile = yield* fs.resolve(join(global.config, "AGENTS.md"))
       const loaded: { current: Loaded } = { current: { type: "available", files: [] } }
-      const configured: {
-        sources: string[]
-        remote: Map<string, InstructionDiscovery.File>
-        library: InstructionDiscovery.File[]
-      } = {
+      const configured: { sources: string[]; remote: Map<string, InstructionDiscovery.File> } = {
         sources: [],
         remote: new Map(),
-        library: [],
       }
 
       const publish = (update: Watcher.Update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid)
@@ -177,17 +171,6 @@ export const Plugin = define({
             { concurrency: 4 },
           )
           configured.sources = sources
-          // Keyed by ID, which stays put across renames and edits, so changes render as diffs.
-          configured.library = entries
-            .filter((entry): entry is ConfigIntegration.Document => entry instanceof ConfigIntegration.Document)
-            .flatMap((document) => document.library?.instructions ?? [])
-            .map(
-              (instruction) =>
-                new InstructionDiscovery.File({
-                  path: `OpenCode Console instruction ${instruction.id}`,
-                  content: instruction.content,
-                }),
-            )
           configured.remote = new Map(
             fetched.filter((file) => file !== undefined).map((file) => [file.path, file] as const),
           )
@@ -213,11 +196,7 @@ export const Plugin = define({
           })
           loaded.current =
             Array.isArray(sources.global) && Array.isArray(sources.project) && Array.isArray(sources.configured)
-              ? {
-                  type: "available",
-                  // Console instructions are the most widely shared, so they lead the prompt.
-                  files: [...configured.library, ...sources.global, ...sources.project, ...sources.configured],
-                }
+              ? { type: "available", files: [...sources.global, ...sources.project, ...sources.configured] }
               : { type: "unavailable" }
           if (!file) return
           yield* Effect.logDebug("instructions rescanned", {

@@ -38,9 +38,7 @@ Keep guidance that applies everywhere in the global file. Put repository-wide gu
 
 If the workspace is outside the project root, only the global file is loaded. Set `OPENCODE_DISABLE_PROJECT_CONFIG=1` to skip project `AGENTS.md` discovery without disabling the global file.
 
-<Callout type="note">
-  OpenCode V2 recognizes `AGENTS.md` only. It does not use `CLAUDE.md` as a fallback.
-</Callout>
+<Callout type="note">OpenCode V2 recognizes `AGENTS.md` only. It does not use `CLAUDE.md` as a fallback.</Callout>
 
 ## Discovery
 
@@ -68,14 +66,12 @@ The selected agent or provider system prompt is sent first. OpenCode then assemb
 1. Agent or provider system prompt
 2. Code Mode tool guidance, when enabled
 3. MCP server, reference, and skill guidance
-4. OpenCode Console instructions, global and project AGENTS.md files, then configured instructions
+4. Global and project AGENTS.md files, then configured instructions
 5. Built-in date and environment context
 6. Session-specific instruction entries supplied through the API
 ```
 
 These sources are combined rather than used as overrides. Nested `AGENTS.md` files discovered later are added to session history in discovery order.
-
-A connected [OpenCode Console](/console) workspace can share instructions. They arrive with the workspace's config and load before the global `AGENTS.md`, in the order the workspace sets. When the workspace edits one, running sessions receive the change as an update, like a changed `AGENTS.md`.
 
 ## Updates
 
@@ -128,5 +124,7 @@ Configured instructions load after `AGENTS.md` files, in the order they are list
 - Local files update like `AGENTS.md` when they change. New files matching a glob load on the next config change.
 - Missing files are skipped. A URL that cannot be fetched is skipped, or keeps its last fetched content.
 - With `OPENCODE_DISABLE_PROJECT_CONFIG=1`, or when the workspace is outside the project, relative entries resolve against the global config directory.
+
+A connected [OpenCode Console](/console) workspace can also share instructions.
 
 See [Config](/config) for configuration locations and precedence.
