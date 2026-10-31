@@ -530,6 +530,26 @@ test("raw JSON schemas with regex patterns still validate input", async () => {
   expect(await Effect.runPromise(execute(tool, { id: "not-hex", count: 1 }, context))).toMatchObject({
     content: [{ type: "text", text: '{"id":"not-hex","count":1}' }],
   })
+  const oneOf: Info = {
+    ...tool,
+    name: "pattern-one-of",
+    input: {
+      type: "object",
+      properties: {
+        v: {
+          oneOf: [
+            { type: "string", pattern: "^a" },
+            { type: "integer", minimum: 0 },
+            { type: "string", pattern: "^b" },
+          ],
+        },
+      },
+    },
+  }
+  expect(await Effect.runPromise(execute(oneOf, { v: "abc" }, context))).toMatchObject({
+    content: [{ type: "text", text: '{"v":"abc"}' }],
+  })
+  expect(await Effect.runPromise(Effect.flip(execute(oneOf, { v: true }, context)))).toBeInstanceOf(Tool.Error)
   expect(await Effect.runPromise(Effect.flip(execute(tool, { id: "abc" }, context)))).toEqual(
     new Tool.Error({
       message:
