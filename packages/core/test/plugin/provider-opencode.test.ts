@@ -2232,12 +2232,15 @@ describe("OpencodePlugin with a Console config", () => {
     "orders Console instructions ahead of AGENTS.md, diffs edits, and layers skills between built-ins and local config",
     () => {
       const lines = (lead: string) => [lead, ...Array.from({ length: 20 }, (_, i) => `keep ${i}`)].join("\n")
-      const state = { lead: "required", title: "Standards" }
+      const state = { lead: "required", title: "Standards", flakyOk: false }
       const server = {
         fetch: (req: Request) => {
           const pathname = new URL(req.url).pathname
-          if (pathname.startsWith("/api/v2/library/skills/"))
-            return skillBundle(path.basename(pathname), "1", "Console", { "references/style.md": "Style" })
+          if (pathname.startsWith("/api/v2/library/skills/")) {
+            const slug = path.basename(pathname)
+            if (slug === "flaky" && !state.flakyOk) return new Response("unavailable", { status: 503 })
+            return skillBundle(slug, "1", "Console", { "references/style.md": "Style" })
+          }
           return Response.json({
             $schema,
             policies: [{ action: "skill.use", resource: "denied", effect: "deny" }],
@@ -2246,7 +2249,7 @@ describe("OpencodePlugin with a Console config", () => {
                 { id: "ins_2", name: state.title, content: lines(state.lead) },
                 { id: "ins_1", name: "Standards", content: "optional" },
               ],
-              skills: ["builtin", "shared", "denied"].map((slug) => ({ slug, version: "1" })),
+              skills: ["builtin", "shared", "denied", "flaky"].map((slug) => ({ slug, version: "1" })),
             },
           })
         },
@@ -2307,6 +2310,16 @@ describe("OpencodePlugin with a Console config", () => {
         ])
         const builtin = required(listed.find((s) => s.id === "builtin"))
         expect(yield* fs.readFileString(path.join(path.dirname(builtin.path), "references/style.md"))).toBe("Style")
+
+        // A failed skill download retries on the next poll even when the Console config itself is unchanged.
+        state.flakyOk = true
+        yield* TestClock.adjust("1 minute")
+        yield* drain
+        expect((yield* skills.list()).map((s) => s.id)).toEqual([
+          Skill.ID.make("builtin"),
+          Skill.ID.make("shared"),
+          Skill.ID.make("flaky"),
+        ])
       }).pipe(Effect.provide(Watcher.testLayer))
     },
   )

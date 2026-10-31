@@ -229,7 +229,7 @@ export const OpencodePlugin = define<
     let checked = Number.NEGATIVE_INFINITY
     let currentInstructions: InstructionDiscovery.File[] = []
     let currentSkills: Skill.Info[] = []
-    let skillsKey = ""
+    let skillsKey: string | undefined = "none"
 
     const load = Effect.fn("OpencodePlugin.load")(function* () {
       checked = yield* Clock.currentTimeMillis
@@ -379,7 +379,7 @@ export const OpencodePlugin = define<
       if (!allowed()) {
         currentInstructions = []
         currentSkills = []
-        skillsKey = ""
+        skillsKey = "none"
         return
       }
       // Keyed by ID, which stays put across renames and edits, so changes render as diffs.
@@ -395,7 +395,7 @@ export const OpencodePlugin = define<
       const listed = next.remote?.library?.skills ?? []
       if (!origin || !connection || listed.length === 0) {
         currentSkills = []
-        skillsKey = ""
+        skillsKey = "none"
         return
       }
       const key = JSON.stringify([origin, IntegrationConnection.key(connection), next.orgID ?? "", listed])
@@ -430,15 +430,13 @@ export const OpencodePlugin = define<
         { concurrency: 4 },
       ).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("failed to load Console skills", { cause }).pipe(
-            Effect.as([] as { skill: Skill.Info | undefined; fresh: boolean }[]),
-          ),
+          Effect.logWarning("failed to load Console skills", { cause }).pipe(Effect.as(undefined)),
         ),
       )
       currentSkills = Array.from(
-        new Map(loaded.flatMap((item) => (item.skill ? [[item.skill.id, item.skill] as const] : []))).values(),
+        new Map((loaded ?? []).flatMap((item) => (item.skill ? [[item.skill.id, item.skill] as const] : []))).values(),
       )
-      skillsKey = loaded.length === listed.length && loaded.every((item) => item.fresh) ? key : ""
+      skillsKey = loaded?.every((item) => item.fresh) ? key : undefined
     })
     const search = (providerID: WebSearch.ID, connection: NonNullable<ActiveConnection>) => ({
       id: providerID,
@@ -592,7 +590,11 @@ export const OpencodePlugin = define<
         Effect.gen(function* () {
           if ((yield* Clock.currentTimeMillis) - checked < Duration.toMillis(maxAge)) return
           const next = yield* load()
-          if (!Equal.equals(snapshot, next)) yield* apply(next)
+          if (!Equal.equals(snapshot, next)) return yield* apply(next)
+          if (skillsKey !== undefined) return
+          const before = currentSkills
+          yield* syncLibrary(snapshot)
+          if (!isDeepStrictEqual(before, currentSkills)) yield* ctx.skill.reload()
         }),
       )
 
