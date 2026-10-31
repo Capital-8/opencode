@@ -4,7 +4,7 @@ import type { SqlClient } from "effect/sql"
 
 export const supportsTuningPragmas = true
 
-// Foreign keys default OFF and can be toggled per connection.
+// Foreign keys default ON in node:sqlite and can be toggled per connection.
 export const supportsForeignKeyToggle = true
 
 // Opening the database can only fail on a broken file or a lock held past

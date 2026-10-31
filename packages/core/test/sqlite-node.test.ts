@@ -36,6 +36,12 @@ describe.skipIf(process.platform === "win32" || !node)("node sqlite client", () 
         journal: "wal",
         reason: "ConstraintError",
         rows: 2,
+        inserted: [{ id: 1, name: "Ada" }],
+        duplicate: "EffectDrizzleQueryError",
+        afterFailure: [{ id: 1, name: "Ada" }],
+        raw: 1,
+        leakedTransaction: [],
+        leakedReserve: [],
       })
     } finally {
       await rm(dir, { recursive: true, force: true })
