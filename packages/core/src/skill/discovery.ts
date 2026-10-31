@@ -45,25 +45,6 @@ export function isSafeRelativePath(value: string) {
   )
 }
 
-/** Moves a fully written `staging` directory to `root`, restoring the previous copy if the move fails. */
-export const replace = (fs: FSUtil.Interface, root: string, staging: string) =>
-  Effect.uninterruptible(
-    Effect.gen(function* () {
-      const backup = `${root}.old-${crypto.randomUUID()}`
-      const cached = yield* fs.exists(root).pipe(Effect.orDie)
-      if (cached) yield* fs.rename(root, backup)
-      yield* fs.rename(staging, root).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
-            return yield* Effect.fail(error)
-          }),
-        ),
-      )
-      if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
-    }),
-  )
-
 class IndexSkill extends Schema.Class<IndexSkill>("SkillDiscovery.IndexSkill")({
   name: Schema.String,
   version: Schema.optional(Schema.String),
@@ -174,7 +155,9 @@ const layer = Layer.effect(
                   discard: true,
                 })
               } else {
-                const staging = `${root}.tmp-${crypto.randomUUID()}`
+                const token = crypto.randomUUID()
+                const staging = `${root}.tmp-${token}`
+                const backup = `${root}.old-${token}`
                 yield* Effect.gen(function* () {
                   const downloaded = yield* Effect.forEach(
                     files,
@@ -187,7 +170,21 @@ const layer = Layer.effect(
                     (yield* fs.exists(path.join(staging, `${skill.name}.md`)).pipe(Effect.orDie))
                   if (!exists) return
                   yield* fs.writeFileString(path.join(staging, ".opencode-version"), version)
-                  yield* replace(fs, root, staging)
+                  yield* Effect.uninterruptible(
+                    Effect.gen(function* () {
+                      const cached = yield* fs.exists(root).pipe(Effect.orDie)
+                      if (cached) yield* fs.rename(root, backup)
+                      yield* fs.rename(staging, root).pipe(
+                        Effect.catch((error) =>
+                          Effect.gen(function* () {
+                            if (cached) yield* fs.rename(backup, root).pipe(Effect.ignore)
+                            return yield* Effect.fail(error)
+                          }),
+                        ),
+                      )
+                      if (cached) yield* fs.remove(backup, { recursive: true, force: true }).pipe(Effect.ignore)
+                    }),
+                  )
                 }).pipe(
                   Effect.catch((error) => Effect.logError("failed to refresh skill", { skill: skill.name, error })),
                   Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)),

@@ -38,12 +38,18 @@ import { OpencodePlugin } from "@opencode/core/plugin/provider/opencode"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { SessionInstructions } from "@opencode/core/session/instructions"
 import { Skill } from "@opencode/core/skill"
+import { Tool } from "@opencode/core/tool"
+import { ReadTool } from "@opencode/core/tool/plugin/read"
+import { SkillTool } from "@opencode/core/tool/plugin/skill"
+import { ReadToolFileSystem } from "@opencode/core/tool/read-filesystem"
 import { WebSearch } from "@opencode/core/websearch"
 import { withEnv } from "../fixture/env"
 import { drain } from "../lib/clock"
 import { testEffect } from "../lib/effect"
 import { readInitial, readUpdate } from "../lib/instructions"
+import { executeTool, toolIdentity } from "../lib/tool"
 import { PluginTestLayer } from "./fixture"
 
 const it = testEffect(PluginTestLayer)
@@ -2259,6 +2265,7 @@ describe("OpencodePlugin with a Console config", () => {
         const config = yield* Config.Test
         const discovery = yield* InstructionDiscovery.Service
         const skills = yield* Skill.Service
+        const tools = yield* Tool.Service
         const fs = yield* FSUtil.Service
         const global = yield* Global.Service
         const location = yield* Location.Service
@@ -2276,7 +2283,7 @@ describe("OpencodePlugin with a Console config", () => {
             id: Skill.ID.make("builtin"),
             name: Skill.Name.make("builtin"),
             description: "Built-in",
-            path: AbsolutePath.make(path.join(location.directory, "builtin", "SKILL.md")),
+            path: AbsolutePath.make("skill://builtin/SKILL.md"),
             content: "# builtin",
           }),
         )
@@ -2286,6 +2293,14 @@ describe("OpencodePlugin with a Console config", () => {
         })
         const host = yield* PluginHost.make(yield* Plugin.Service)
         yield* OpencodePlugin.effect(host).pipe(inProcess(server))
+        yield* SkillTool.Plugin.effect(host)
+        yield* ReadTool.Plugin.effect(host).pipe(
+          Effect.provide(
+            AppNodeBuilder.build(LayerNode.group([ReadToolFileSystem.node, SessionInstructions.node]), [
+              Location.node.replace(Layer.succeed(Location.Service, location)),
+            ]),
+          ),
+        )
         yield* ConfigInstructionPlugin.Plugin.effect(host)
         yield* ConfigSkillPlugin.Plugin.effect(host)
         yield* ConfigPolicyPlugin.Plugin.effect(host)
@@ -2304,12 +2319,43 @@ describe("OpencodePlugin with a Console config", () => {
         expect(update).toContain("-required\n+updated")
 
         const listed = yield* skills.list()
-        expect(listed.map((s) => [s.id, s.description])).toEqual([
-          [Skill.ID.make("builtin"), "Console"],
-          [Skill.ID.make("shared"), "Local"],
+        expect(listed.map((s) => [s.id, s.description, s.path])).toEqual([
+          [Skill.ID.make("builtin"), "Console", AbsolutePath.make("skill://builtin/SKILL.md")],
+          [Skill.ID.make("shared"), "Local", AbsolutePath.make(path.join(local, "shared", "SKILL.md"))],
         ])
-        const builtin = required(listed.find((s) => s.id === "builtin"))
-        expect(yield* fs.readFileString(path.join(path.dirname(builtin.path), "references/style.md"))).toBe("Style")
+        expect(yield* skills.files(Skill.ID.make("denied"))).toBeUndefined()
+        expect(yield* skills.files(Skill.ID.make("shared"))).toBeUndefined()
+        expect(yield* fs.exists(path.join(global.cache, "skills"))).toBe(false)
+
+        const sessionID = Session.ID.make("ses_console_skill")
+        expect(
+          yield* executeTool(tools, {
+            sessionID,
+            ...toolIdentity,
+            call: { type: "tool-call", id: "call-skill", name: "skill", input: { id: "builtin" } },
+          }),
+        ).toMatchObject({
+          status: "completed",
+          metadata: { name: "builtin", directory: "skill://builtin" },
+          content: [
+            { type: "text", text: expect.stringContaining("<file>skill://builtin/references/style.md</file>") },
+          ],
+        })
+        expect(
+          yield* executeTool(tools, {
+            sessionID,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-read",
+              name: "read",
+              input: { path: "skill://builtin/references/style.md" },
+            },
+          }),
+        ).toMatchObject({
+          status: "completed",
+          content: [{ type: "text", text: "Read file skill://builtin/references/style.md, lines 1-1\n1: Style" }],
+        })
 
         // A failed skill download retries on the next poll even when the Console config itself is unchanged.
         state.flakyOk = true
@@ -2358,7 +2404,6 @@ describe("OpencodePlugin with a Console config", () => {
       (origin) =>
         Effect.gen(function* () {
           const credentials = yield* Credential.Service
-          const fs = yield* FSUtil.Service
           const app = yield* App.Metadata
           const stored = yield* credentials.create({
             integrationID: Integration.ID.make("opencode"),
@@ -2368,10 +2413,7 @@ describe("OpencodePlugin with a Console config", () => {
             Effect.gen(function* () {
               const localSkills = yield* Skill.Service
               const host = yield* PluginHost.make(yield* Plugin.Service)
-              yield* OpencodePlugin.effect({
-                ...host,
-                skill: { ...host.skill, transform: localSkills.transform, reload: localSkills.reload },
-              })
+              yield* OpencodePlugin.effect(host)
               return yield* localSkills.list()
             }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([Skill.node, Bus.node])))),
           )
@@ -2395,23 +2437,24 @@ describe("OpencodePlugin with a Console config", () => {
           state.requests = []
           state.listed = [{ slug: "review", version: "skl_1:1" }]
           const cached = yield* loadSkills
-          expect(cached.map((s) => s.id)).toEqual([Skill.ID.make("review")])
+          expect(cached.map((s) => [s.id, s.path])).toEqual([
+            [Skill.ID.make("review"), AbsolutePath.make("skill://review/SKILL.md")],
+          ])
           expect(state.requests).toEqual([])
-          expect(yield* fs.exists(required(one.find((s) => s.id === "deploy")).path)).toBe(true)
 
-          state.respond = async () => skillBundle("review", "skl_1:1", "Console")
-          yield* fs.remove(cached[0]!.path)
-          expect((yield* loadSkills).map((s) => s.description)).toEqual(["Console"])
+          state.respond = async () => skillBundle("review", "skl_1:2", "Updated")
+          state.listed = [{ slug: "review", version: "skl_1:2" }]
+          expect((yield* loadSkills).map((s) => s.description)).toEqual(["Updated"])
           expect(state.requests).toHaveLength(1)
 
           state.respond = async () => new Response("unavailable", { status: 503 })
-          state.listed = [{ slug: "review", version: "skl_1:2" }]
-          expect((yield* loadSkills).map((s) => s.description)).toEqual(["Console"])
+          state.listed = [{ slug: "review", version: "skl_1:3" }]
+          expect((yield* loadSkills).map((s) => s.description)).toEqual(["Updated"])
 
           // Switching workspaces mid-pass keeps cached skills from this workspace's cache without downloading another's.
           state.requests = []
           state.listed = [
-            { slug: "review", version: "skl_1:1" },
+            { slug: "review", version: "skl_1:2" },
             { slug: "fresh", version: "skl_3:1" },
           ]
           state.configGate = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() }
@@ -2433,7 +2476,6 @@ describe("OpencodePlugin with a Console config", () => {
         parent: "../escape.md",
         nested: "references/../../escape.md",
         backslash: "references\\..\\..\\escape.md",
-        version: ".opencode-version",
       }
       return withServer(
         (req) => {
@@ -2508,7 +2550,6 @@ describe("OpencodePlugin with a Console config", () => {
                 expect((yield* skills.list()).map((s) => s.id)).toEqual([Skill.ID.make("good")])
                 expect(requests).not.toContain("/elsewhere")
                 expect(requests.some((r) => r.includes("bad"))).toBe(false)
-                expect(yield* fs.scan("**/escape.md", { cwd: location.directory, dot: true })).toEqual([])
               }).pipe(Effect.provide(Config.layer({ system, project: false })))
             }),
           ),

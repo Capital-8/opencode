@@ -1,10 +1,12 @@
 import { isDeepStrictEqual } from "node:util"
-import path from "path"
 import {
+  Cause,
   Clock,
+  Deferred,
   Duration,
   Effect,
   Equal,
+  Exit,
   FiberHandle,
   Option,
   Schema,
@@ -16,10 +18,6 @@ import {
 import type { IntegrationOAuthMethodRegistration } from "@opencode/plugin/effect/integration"
 import { define } from "@opencode/plugin/effect/plugin"
 import type { SessionHttpResponse } from "@opencode/plugin/effect/session"
-import { EffectFlock } from "@opencode/util/effect-flock"
-import { FSUtil } from "@opencode/util/fs-util"
-import { Global } from "@opencode/util/global"
-import { Hash } from "@opencode/util/hash"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { App } from "../../app.js"
 import { Bus } from "../../bus.js"
@@ -33,7 +31,8 @@ import { InstructionDiscovery } from "../../instruction-discovery.js"
 import { Integration } from "../../integration.js"
 import { IntegrationConnection } from "../../integration/connection.js"
 import { Provider } from "../../provider.js"
-import type { Skill } from "../../skill.js"
+import { AbsolutePath } from "../../schema.js"
+import { Skill } from "../../skill.js"
 import { SkillDiscovery } from "../../skill/discovery.js"
 import { WebSearch } from "../../websearch.js"
 
@@ -187,15 +186,15 @@ function oauth(http: HttpClient.HttpClient) {
   } satisfies IntegrationOAuthMethodRegistration
 }
 
+type LoadedSkill = {
+  readonly skill: Skill.Info
+  readonly files: Readonly<Record<string, string>>
+}
+const skillCache = new Map<string, { readonly version: string; readonly value: LoadedSkill | undefined }>()
+const pendingSkills = new Map<string, Deferred.Deferred<LoadedSkill | undefined, unknown>>()
+
 export const OpencodePlugin = define<
-  | HttpClient.HttpClient
-  | Bus.Service
-  | Config.Service
-  | InstructionDiscovery.Service
-  | FSUtil.Service
-  | Global.Service
-  | EffectFlock.Service
-  | Scope.Scope
+  HttpClient.HttpClient | Bus.Service | Config.Service | InstructionDiscovery.Service | Skill.Service | Scope.Scope
 >({
   id: "opencode.provider.opencode",
   effect: Effect.fn(function* (ctx) {
@@ -207,9 +206,7 @@ export const OpencodePlugin = define<
     const http = HttpClient.mapRequest(client, HttpClientRequest.setHeader("User-Agent", App.useragent(ctx.app)))
     const config = yield* Config.Service
     const discovery = yield* InstructionDiscovery.Service
-    const fs = yield* FSUtil.Service
-    const global = yield* Global.Service
-    const flock = yield* EffectFlock.Service
+    const skills = yield* Skill.Service
     const scope = yield* Scope.Scope
     const loading = Semaphore.makeUnsafe(1)
     type ActiveConnection = Effect.Success<ReturnType<typeof ctx.integration.connection.active>>
@@ -228,7 +225,7 @@ export const OpencodePlugin = define<
     // When the last Console config load started, so rejected inference can reuse a recent status.
     let checked = Number.NEGATIVE_INFINITY
     let currentInstructions: InstructionDiscovery.File[] = []
-    let currentSkills: Skill.Info[] = []
+    let currentSkills: LoadedSkill[] = []
     let skillsKey: string | undefined = "none"
 
     const load = Effect.fn("OpencodePlugin.load")(function* () {
@@ -326,53 +323,51 @@ export const OpencodePlugin = define<
       integrated = yield* readIntegrated()
     })
 
-    const read = (target: string) => fs.readFileStringSafe(target).pipe(Effect.orElseSucceed(() => undefined))
-
-    // A version already on disk costs no request; a failed download keeps the cached version.
+    // A version already cached in memory costs no request; a failed download keeps the previous version.
     const librarySkill = Effect.fnUntraced(function* (input: {
       url: string
       headers: Effect.Effect<Record<string, string>, unknown>
-      root: string
+      scope: readonly [string, string, string]
       slug: string
       version: string
     }) {
-      const file = path.join(input.root, "SKILL.md")
-      const cached = Effect.all([read(path.join(input.root, ".opencode-version")), read(file)]).pipe(
-        Effect.map(([version, content]) => (version === input.version ? content : undefined)),
+      const slugKey = JSON.stringify([...input.scope, input.slug])
+      const cached = skillCache.get(slugKey)
+      if (cached?.version === input.version) return { item: cached.value, fresh: true }
+      const versionKey = JSON.stringify([...input.scope, input.slug, input.version])
+      return yield* Effect.gen(function* () {
+        const pending = pendingSkills.get(versionKey)
+        if (pending) {
+          const exit = yield* Effect.exit(Deferred.await(pending))
+          if (Exit.isSuccess(exit)) return { item: exit.value, fresh: true }
+          if (!Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
+        }
+        const deferred = Deferred.makeUnsafe<LoadedSkill | undefined, unknown>()
+        const value = yield* Effect.uninterruptibleMask((restore) => {
+          pendingSkills.set(versionKey, deferred)
+          return restore(downloadSkill(http, input)).pipe(
+            Effect.tap((loaded) =>
+              Effect.sync(() => {
+                skillCache.set(slugKey, { version: input.version, value: loaded })
+              }),
+            ),
+            Effect.onExit((exit) => {
+              if (pendingSkills.get(versionKey) === deferred) pendingSkills.delete(versionKey)
+              return Deferred.done(deferred, exit)
+            }),
+          )
+        })
+        return { item: value, fresh: true }
+      }).pipe(
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt
+          return Effect.logWarning("failed to download Console skill", {
+            slug: input.slug,
+            version: input.version,
+            cause,
+          }).pipe(Effect.as({ item: skillCache.get(slugKey)?.value, fresh: false }))
+        }),
       )
-      const hit = yield* cached
-      const outcome =
-        hit !== undefined
-          ? { content: hit, fresh: true }
-          : yield* Effect.gen(function* () {
-              // Locations and processes share the cache: one downloads while the others wait, then reuse its copy.
-              yield* flock.acquire(`console-skill:${input.root}`, undefined, { staleMs: 10_000, timeoutMs: 35_000 })
-              const current = yield* cached
-              if (current !== undefined) return { content: current, fresh: true }
-              yield* downloadSkill(http, fs, input)
-              return { content: yield* read(file), fresh: true }
-            }).pipe(
-              Effect.scoped,
-              Effect.catchCause((cause) =>
-                Effect.logWarning("failed to download Console skill", {
-                  slug: input.slug,
-                  version: input.version,
-                  cause,
-                }).pipe(
-                  Effect.andThen(read(file)),
-                  Effect.map((content) => ({ content, fresh: false })),
-                ),
-              ),
-            )
-      if (!outcome.content) return { skill: undefined, fresh: false }
-      const parsed = SkillFile.parse(input.root, file, outcome.content)
-      if (parsed._tag === "Parsed") return { skill: parsed.skill, fresh: outcome.fresh }
-      yield* Effect.logDebug("skill file skipped", {
-        filepath: file,
-        reason: parsed.reason,
-        ...(parsed.reason === "frontmatter" ? { issue: parsed.issue } : {}),
-      })
-      return { skill: undefined, fresh: outcome.fresh }
     })
 
     const syncLibrary = Effect.fnUntraced(function* (next: typeof snapshot) {
@@ -398,14 +393,9 @@ export const OpencodePlugin = define<
         skillsKey = "none"
         return
       }
-      const key = JSON.stringify([origin, IntegrationConnection.key(connection), next.orgID ?? "", listed])
+      const scope = [origin, IntegrationConnection.key(connection) ?? "", next.orgID ?? ""] as const
+      const key = JSON.stringify([...scope, listed])
       if (key === skillsKey) return
-      // Workspaces on one server can share skill slugs, so each connection and workspace keeps its own cache.
-      const cache = path.resolve(
-        global.cache,
-        "skills",
-        Hash.fast([origin, IntegrationConnection.key(connection), next.orgID ?? ""].join("\n")),
-      )
       // Only a download needs the credential, so cached skills cost no token refresh and survive a failed one.
       const headers = yield* Effect.cached(
         Effect.gen(function* () {
@@ -423,18 +413,21 @@ export const OpencodePlugin = define<
           librarySkill({
             url: `${origin}/api/v2/library/skills/${encodeURIComponent(skill.slug)}`,
             headers,
-            root: path.join(cache, skill.slug),
+            scope,
             slug: skill.slug,
             version: skill.version,
           }),
         { concurrency: 4 },
       ).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to load Console skills", { cause }).pipe(Effect.as(undefined)),
-        ),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt
+          return Effect.logWarning("failed to load Console skills", { cause }).pipe(Effect.as(undefined))
+        }),
       )
       currentSkills = Array.from(
-        new Map((loaded ?? []).flatMap((item) => (item.skill ? [[item.skill.id, item.skill] as const] : []))).values(),
+        new Map(
+          (loaded ?? []).flatMap((entry) => (entry.item ? [[entry.item.skill.id, entry.item] as const] : [])),
+        ).values(),
       )
       skillsKey = loaded?.every((item) => item.fresh) ? key : undefined
     })
@@ -504,7 +497,7 @@ export const OpencodePlugin = define<
             integrated = yield* readIntegrated()
             if (allowed() === wasAllowed) return
             yield* syncLibrary(snapshot)
-            yield* Effect.all([ctx.provider.reload(), ctx.websearch.reload(), discovery.reload(), ctx.skill.reload()], {
+            yield* Effect.all([ctx.provider.reload(), ctx.websearch.reload(), discovery.reload(), skills.reload()], {
               concurrency: 4,
               discard: true,
             })
@@ -567,8 +560,8 @@ export const OpencodePlugin = define<
     yield* discovery.transform((editor) => {
       currentInstructions.forEach((file) => editor.add(file))
     })
-    yield* ctx.skill.transform((editor) => {
-      currentSkills.forEach((skill) => editor.add(skill))
+    yield* skills.transform((editor) => {
+      currentSkills.forEach((item) => editor.add(item.skill, item.files))
     })
 
     const apply = Effect.fn("OpencodePlugin.apply")(function* (next: typeof snapshot) {
@@ -577,7 +570,7 @@ export const OpencodePlugin = define<
       yield* syncLibrary(next)
       yield* guard(next)
       yield* Effect.all(
-        [ctx.provider.reload(), ctx.websearch.reload(), ctx.mcp.reload(), discovery.reload(), ctx.skill.reload()],
+        [ctx.provider.reload(), ctx.websearch.reload(), ctx.mcp.reload(), discovery.reload(), skills.reload()],
         { concurrency: 5, discard: true },
       )
     })
@@ -594,7 +587,7 @@ export const OpencodePlugin = define<
           if (skillsKey !== undefined) return
           const before = currentSkills
           yield* syncLibrary(snapshot)
-          if (!isDeepStrictEqual(before, currentSkills)) yield* ctx.skill.reload()
+          if (!isDeepStrictEqual(before, currentSkills)) yield* skills.reload()
         }),
       )
 
@@ -682,11 +675,9 @@ function fetchConfig(http: HttpClient.HttpClient, value: Credential.Key | Creden
 
 function downloadSkill(
   http: HttpClient.HttpClient,
-  fs: FSUtil.Interface,
   input: {
     url: string
     headers: Effect.Effect<Record<string, string>, unknown>
-    root: string
     slug: string
   },
 ) {
@@ -705,26 +696,27 @@ function downloadSkill(
       )
     if (bundle.slug !== input.slug)
       return yield* Effect.fail(new Error(`expected skill ${input.slug}, received ${bundle.slug}`))
-    const unsafe = bundle.files.find((file) => {
-      const destination = path.resolve(input.root, file.path)
-      return (
-        !SkillDiscovery.isSafeRelativePath(file.path) ||
-        file.path.toLowerCase() === ".opencode-version" ||
-        !FSUtil.contains(input.root, destination) ||
-        destination === input.root
-      )
-    })
+    const unsafe = bundle.files.find((file) => !SkillDiscovery.isSafeRelativePath(file.path))
     if (unsafe) return yield* Effect.fail(new Error(`unsafe skill file path: ${unsafe.path}`))
-    if (!bundle.files.some((file) => file.path === "SKILL.md"))
-      return yield* Effect.fail(new Error(`skill ${input.slug} has no SKILL.md`))
-    const staging = `${input.root}.tmp-${crypto.randomUUID()}`
-    yield* Effect.gen(function* () {
-      yield* Effect.forEach(bundle.files, (file) => fs.writeWithDirs(path.resolve(staging, file.path), file.content), {
-        discard: true,
+    const main = bundle.files.find((file) => file.path === "SKILL.md")
+    if (!main) return yield* Effect.fail(new Error(`skill ${input.slug} has no SKILL.md`))
+    const filepath = Skill.uri(input.slug, "SKILL.md")
+    const parsed = SkillFile.parse(`/${input.slug}`, `/${input.slug}/SKILL.md`, main.content)
+    if (parsed._tag !== "Parsed") {
+      yield* Effect.logDebug("skill file skipped", {
+        filepath,
+        reason: parsed.reason,
+        ...(parsed.reason === "frontmatter" ? { issue: parsed.issue } : {}),
       })
-      yield* fs.writeFileString(path.join(staging, ".opencode-version"), bundle.version)
-      yield* SkillDiscovery.replace(fs, input.root, staging)
-    }).pipe(Effect.ensuring(fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore)))
+      return undefined
+    }
+    const files = Object.fromEntries(
+      bundle.files.filter((file) => file.path !== "SKILL.md").map((file) => [file.path, file.content]),
+    )
+    return {
+      skill: { ...parsed.skill, path: AbsolutePath.make(filepath) },
+      files,
+    } satisfies LoadedSkill
   })
 }
 
