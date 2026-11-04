@@ -34,3 +34,8 @@ test("accepts an optional CORS allowlist", () => {
   ])
   expect(Option.isNone(decode({ cors: "http://192.168.1.10:3001" }))).toBe(true)
 })
+
+test("accepts Console refresh options", () => {
+  expect(Option.getOrThrow(decode({ console: { poll: false } })).console).toEqual({ poll: false })
+  expect(Option.isNone(decode({ console: { poll: "no" } }))).toBe(true)
+})

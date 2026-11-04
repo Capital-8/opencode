@@ -46,6 +46,8 @@ export interface Options {
   readonly config?: { readonly content?: string }
   /** models.dev catalog options; the bundled snapshot is the boot-time floor either way. */
   readonly models?: ServerOptions["models"]
+  /** Console config refresh. `poll` defaults to `false` here, so an idle Durable Object can hibernate. */
+  readonly console?: ServerOptions["console"]
 }
 
 /**
@@ -71,6 +73,7 @@ export function serverOptions(options: Options): ServerOptions {
     events: { persist: true },
     config: { content: options.config?.content },
     models: options.models,
+    console: { poll: false, ...options.console },
   }
 }
 
