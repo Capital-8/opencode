@@ -122,7 +122,7 @@ function session(input: {
     id: "session-1",
     background: input.background,
     directory: "C:/repo",
-    handoff: input.handoff ?? { set() {}, settle() {}, clear() {} },
+    handoff: input.handoff ?? { set() {}, hold() {}, settle() {}, clear() {} },
     current: input.current ?? (() => undefined),
     admitted: input.admitted ?? (() => false),
     api: {
@@ -234,7 +234,7 @@ describe("Composer submission", () => {
     const submission = submitInput({
       ...active(
         state,
-        session({ calls, handoff: { set: (handoff) => handoffs.push(handoff), settle() {}, clear() {} } }),
+        session({ calls, handoff: { set: (handoff) => handoffs.push(handoff), hold() {}, settle() {}, clear() {} } }),
       ),
       beforeSubmit: () => calls.push("keep-preview"),
     })
@@ -601,7 +601,7 @@ describe("Composer submission", () => {
 
     const target = session({
       calls,
-      handoff: { set: (value) => handoffs.push(value), settle() {}, clear() {} },
+      handoff: { set: (value) => handoffs.push(value), hold() {}, settle() {}, clear() {} },
       prompt: async (value) => admitted.resolve(value),
     })
 
@@ -632,7 +632,7 @@ describe("Composer submission", () => {
       const target = session({
         calls: [],
         statuses,
-        handoff: { set: (handoff) => handoffs.push(handoff), settle() {}, clear() {} },
+        handoff: { set: (handoff) => handoffs.push(handoff), hold() {}, settle() {}, clear() {} },
         switchModel: async () => committed.promise,
       })
 
@@ -1147,7 +1147,7 @@ describe("Composer submission", () => {
 
     const target = session({
       calls: [],
-      handoff: { set: handedOff.resolve, settle() {}, clear() {} },
+      handoff: { set: handedOff.resolve, hold() {}, settle() {}, clear() {} },
       prompt: async () => admitted.resolve(),
     })
 
@@ -1189,6 +1189,7 @@ describe("Composer submission", () => {
       admitted: () => row.admitted,
       handoff: {
         set: (value) => handoff.push(`set:${value.message.id}`),
+        hold: (value) => handoff.push(`hold:${value.message.id}`),
         settle: (id) => {
           handoff.push(`settle:${id}`)
           ended.resolve()
