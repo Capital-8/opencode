@@ -6,7 +6,7 @@ import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import type { Shell as ShellSchema } from "@opencode/schema/shell"
 import type { Tool } from "@opencode/schema/tool"
-import { Cause, Deferred, Effect, Exit, Schema, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Schema } from "effect"
 import { Environment } from "../../environment/index.js"
 import { Job } from "../../job.js"
 import { FileAccess } from "../../file-access.js"
@@ -69,6 +69,7 @@ const StructuredOutput = Schema.Struct({
   shellID: Schema.optionalKey(Schema.String),
   truncated: Schema.Boolean,
   timeout: Schema.optionalKey(Schema.Boolean),
+  killed: Schema.optionalKey(Schema.String),
 })
 
 const Output = Schema.Struct({
@@ -108,10 +109,10 @@ export const Plugin = {
   effect: Effect.fn("ShellTool.Plugin")(function* (ctx: Context) {
     const sessions = yield* Session.Service
     const jobs = yield* Job.Service
-    const scope = yield* Scope.Scope
     const environment = yield* Environment.Service
     const access = yield* FileAccess.Service
     const shell = yield* Shell.Service
+    const daemon = yield* Shell.Daemon
     const shellSelect = yield* ShellSelect.Service
     const compatibleShell = shellSelect.resolve({ priority: "compat" })
     const permission = yield* Permission.Service
@@ -177,7 +178,9 @@ export const Plugin = {
         })
         if (info.notificationID) yield* jobs.completeBackground(info.notificationID)
       },
-      Effect.forkIn(scope, { startImmediately: true }),
+      // Not in this Location's scope: a daemon command outlives a Location that closes while the server runs, and
+      // its session must still hear how it ended.
+      (effect) => daemon.watch(effect),
     )
 
     // Ends the job of an interrupted foreground call. When the user interrupted it, the call settles with the
