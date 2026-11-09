@@ -1996,7 +1996,7 @@ describe("ShellTool interrupted", () => {
     registry: Tool.Interface,
     command: string,
     id: string,
-    reason: "user" | undefined,
+    reason: "user" | "shutdown",
     waitForOutput = true,
   ) =>
     Effect.gen(function* () {
@@ -2095,24 +2095,46 @@ describe("ShellTool interrupted", () => {
     { timeout: 15_000 },
   )
 
-  test("leaves a call interrupted by teardown to the step, not cancelled by the user", () =>
+  fakeDaemonIt.live("records which call waits on a daemon command, and keeps no timeout for a restart", () =>
+    withTempDir((tmp) => {
+      reset()
+      return withSession(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const { shellID } = yield* interruptCall(registry, "sleep 60", "call-recorded", "shutdown", false)
+          const request = fake?.requests.find((item) => item.op === "create_pipe")
+          expect(request?.metadata).toMatchObject({
+            id: shellID,
+            toolCall: { sessionID, callID: "call-recorded" },
+          })
+          // The call's timeout applies to this server only: a restart moves the command to the background.
+          expect(request?.metadata).not.toHaveProperty("timeoutDeadline")
+          expect(fake?.ops).not.toContain("signal")
+        }),
+      )
+    }),
+  )
+
+  test("leaves a call a shutdown interrupted, and its command, for the next server", () =>
     withTempDir((tmp) => {
       reset()
       return withSession(tmp.path, (registry) =>
         Effect.gen(function* () {
           const shell = yield* Shell.Service
+          const jobs = yield* Job.Service
           const { shellID, exit, failure } = yield* interruptCall(
             registry,
             "printf ready; sleep 60",
             "call-teardown",
-            undefined,
+            "shutdown",
           )
           expect(Exit.hasInterrupts(exit)).toBe(true)
+          // Nothing says the user cancelled it, and nothing stops the command or ends its job.
           expect(failure).toBeUndefined()
-          // The job is cancelled as before, which stops the command; its file stays.
-          const info = yield* shell.wait(shellID)
-          expect(info.status).toBe("killed")
-          expect(yield* Effect.promise(() => fs.readFile(info.file, "utf8"))).toBe("ready")
+          expect((yield* shell.get(shellID)).status).toBe("running")
+          expect((yield* jobs.get(shellID))?.status).toBe("running")
+          // Only an explicit cancel stops it.
+          yield* jobs.cancel(shellID)
+          expect((yield* shell.wait(shellID)).status).toBe("killed")
         }),
       )
     }))

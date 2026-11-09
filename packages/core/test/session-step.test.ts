@@ -20,6 +20,7 @@ import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
 import { ToolOutput } from "@opencode/core/tool-output"
 import { ToolInterrupted } from "@opencode/core/tool/interrupted"
+import { SessionInterruption } from "@opencode/core/session/interruption"
 import { Money } from "@opencode/schema/money"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
@@ -319,5 +320,80 @@ it.live("records the failure an interrupted tool reports, and still ends interru
         },
       ],
     })
+  }),
+)
+
+it.live("leaves an interrupted step as a crash would when the server shuts down", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({ id: sessionID, project_id: Project.ID.global, slug: "step", directory: "/project", version: "test" })
+      .run()
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "test-model", provider: "test", route: OpenAIChat.route }),
+      {
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1_000 },
+        cost: [],
+      },
+    )
+    yield* llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 1, outputTokens: 1 } },
+        LLMEvent.toolCall({ id: "call-interrupted", name: "test", input: {} }),
+      ),
+    )
+    const started = yield* Deferred.make<void>()
+    const attempt = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: ai.request({ model: model.model, prompt: "Run one tool" }),
+          options: {},
+          // A tool that just ends interrupted, as the shell tool does on shutdown.
+          executeTool: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+        },
+        retry: () => Effect.succeed({ retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(
+        Effect.provideService(SessionInterruption.Reason, () => "shutdown"),
+        Effect.forkChild({ startImmediately: true }),
+      )
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(attempt)
+    const exit = yield* Fiber.await(attempt)
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    expect(yield* llm.requests()).toHaveLength(1)
+    const message = yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, assistantMessageID))
+      .get()
+    // No step end and no settled call: the next server finds the call unsettled.
+    expect(message?.data).not.toHaveProperty("error")
+    expect(message?.data).toMatchObject({ content: [{ type: "tool", state: { status: "running" } }] })
   }),
 )

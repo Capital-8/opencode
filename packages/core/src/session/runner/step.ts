@@ -17,6 +17,7 @@ import { Tool } from "../../tool.js"
 import { ToolOutput } from "../../tool-output.js"
 import { QuestionTool } from "../../tool/plugin/question.js"
 import { ToolInterrupted } from "../../tool/interrupted.js"
+import { SessionInterruption } from "../interruption.js"
 import { StepFailedError } from "../error.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
@@ -171,6 +172,11 @@ export const make = Effect.gen(function* () {
         const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
         if (Exit.isFailure(joined)) yield* interruptTools
         const tools = classifyToolExits(joined, toolRuns)
+        // A server shutting down leaves the step as a crash would: unsettled calls and no step end. The next server
+        // settles them when the Session resumes, and takes over the shell commands still running for them.
+        const reason = yield* SessionInterruption.Reason
+        if ((streamInterrupted || tools.interrupted) && tools.declines.length === 0 && reason() === "shutdown")
+          return yield* Effect.interrupt
 
         if (
           !publisher.record().outputStarted &&

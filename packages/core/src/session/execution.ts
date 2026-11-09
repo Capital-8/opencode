@@ -115,7 +115,8 @@ export const layer = Layer.effect(
         ),
       drain: (sessionID, force, promotable): Effect.Effect<void, SessionRunner.RunError> =>
         drain(sessionID, force, undefined, promotable).pipe(
-          Effect.provideService(SessionInterruption.Reason, () => coordinator.interruption(sessionID)),
+          // Teardown interrupts without calling `interrupt`, so an interrupt with no recorded reason is a shutdown.
+          Effect.provideService(SessionInterruption.Reason, () => coordinator.interruption(sessionID) ?? "shutdown"),
         ),
       // One terminal observation per busy period, covering every coalesced drain.
       settled: (sessionID, exit, reason) =>
