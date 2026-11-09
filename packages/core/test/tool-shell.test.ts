@@ -39,6 +39,8 @@ import { ID } from "@opencode/schema/shell"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { ToolOutput } from "@opencode/core/tool-output"
 import { Tool } from "@opencode/core/tool"
+import { ToolInterrupted } from "@opencode/core/tool/interrupted"
+import { SessionInterruption } from "@opencode/core/session/interruption"
 import { tmpdir, tmpdirScoped, withTempDir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
@@ -1854,4 +1856,132 @@ describe("ShellTool", () => {
       )
     }),
   )
+})
+
+describe("ShellTool interrupted", () => {
+  // Runs a foreground call the way a session step does, and interrupts it, as the user (`"user"`) or as teardown.
+  const interruptCall = (
+    registry: Tool.Interface,
+    command: string,
+    id: string,
+    reason: "user" | undefined,
+    waitForOutput = true,
+  ) =>
+    Effect.gen(function* () {
+      const shell = yield* Shell.Service
+      const slot: ToolInterrupted.Slot = {}
+      const started = yield* Deferred.make<string>()
+      const fiber = yield* executeTool(registry, {
+        ...call({ command }, id),
+        progress: (update) =>
+          typeof update.shellID === "string"
+            ? Deferred.succeed(started, update.shellID).pipe(Effect.asVoid)
+            : Effect.void,
+      }).pipe(
+        Effect.provideService(ToolInterrupted.Slot, slot),
+        Effect.provideService(SessionInterruption.Reason, () => reason),
+        Effect.forkChild({ startImmediately: true }),
+      )
+      const shellID = ID.make(yield* Deferred.await(started))
+      while (waitForOutput && (yield* shell.output(shellID, { cursor: Number.MAX_SAFE_INTEGER })).size === 0)
+        yield* Effect.sleep(Duration.millis(10))
+      yield* Fiber.interrupt(fiber)
+      const exit = yield* Fiber.await(fiber)
+      return { shellID, exit, failure: slot.failure }
+    })
+
+  const test = isWindows ? it.live.skip : it.live
+
+  test("keeps the output of a call the user interrupted and settles it with the tail, file and shell ID", () =>
+    withTempDir((tmp) => {
+      reset()
+      return withSession(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const shell = yield* Shell.Service
+          const jobs = yield* Job.Service
+          const { shellID, exit, failure } = yield* interruptCall(
+            registry,
+            "printf 'first\\nsecond\\n'; sleep 60",
+            "call-interrupted",
+            "user",
+          )
+          // The interrupt still reaches the caller; the failure travels through ToolInterrupted.
+          expect(Exit.hasInterrupts(exit)).toBe(true)
+          const info = yield* shell.get(shellID)
+          expect(info.status).toBe("killed")
+          expect(yield* Effect.promise(() => fs.readFile(info.file, "utf8"))).toBe("first\nsecond\n")
+          expect(failure?.metadata).toEqual({ interrupted: true, truncated: false })
+          expect(failure?.message).toBe(
+            `first\nsecond\n\n[full output saved to ${info.file}]\n\nCommand interrupted by the user (shell ID: ${shellID}).`,
+          )
+          expect((yield* jobs.get(shellID))?.status).not.toBe("running")
+        }),
+      )
+    }))
+
+  test("says once that an interrupted command wrote nothing", () =>
+    withTempDir((tmp) => {
+      reset()
+      return withSession(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const shell = yield* Shell.Service
+          const { shellID, failure } = yield* interruptCall(registry, "sleep 60", "call-silent", "user", false)
+          const info = yield* shell.get(shellID)
+          expect(failure?.message).toBe(
+            `[no output; output file: ${info.file}]\n\nCommand interrupted by the user (shell ID: ${shellID}).`,
+          )
+        }),
+      )
+    }))
+
+  test(
+    "settles a call the user interrupted without waiting for a command that ignores SIGTERM",
+    () =>
+      withTempDir((tmp) => {
+        reset()
+        return withSession(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            const started = Date.now()
+            const { shellID, failure } = yield* interruptCall(
+              registry,
+              "trap '' TERM; printf 'kept\\n'; while :; do sleep 1; done",
+              "call-stubborn",
+              "user",
+            )
+            // Bounded by the short wait, not by the 3 s grace before SIGKILL.
+            expect(Date.now() - started).toBeLessThan(2_500)
+            const info = yield* shell.get(shellID)
+            expect(failure?.message).toBe(
+              `kept\n\n[full output saved to ${info.file}]\n\nCommand interrupted by the user (shell ID: ${shellID}); it is still being stopped.`,
+            )
+            // The stop still ends it.
+            expect((yield* shell.wait(shellID)).status).toBe("killed")
+          }),
+        )
+      }),
+    { timeout: 15_000 },
+  )
+
+  test("leaves a call interrupted by teardown to the step, not cancelled by the user", () =>
+    withTempDir((tmp) => {
+      reset()
+      return withSession(tmp.path, (registry) =>
+        Effect.gen(function* () {
+          const shell = yield* Shell.Service
+          const { shellID, exit, failure } = yield* interruptCall(
+            registry,
+            "printf ready; sleep 60",
+            "call-teardown",
+            undefined,
+          )
+          expect(Exit.hasInterrupts(exit)).toBe(true)
+          expect(failure).toBeUndefined()
+          // The job is cancelled as before, which stops the command; its file stays.
+          const info = yield* shell.wait(shellID)
+          expect(info.status).toBe("killed")
+          expect(yield* Effect.promise(() => fs.readFile(info.file, "utf8"))).toBe("ready")
+        }),
+      )
+    }))
 })

@@ -13,6 +13,7 @@ import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 import { toSessionError } from "./to-session-error.js"
 import { SessionInbox } from "./inbox.js"
+import { SessionInterruption } from "./interruption.js"
 
 export interface Interface {
   /** Snapshots active execution owned by this process. */
@@ -112,7 +113,10 @@ export const layer = Layer.effect(
           sessionID,
           bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID)),
         ),
-      drain: (sessionID, force, promotable) => drain(sessionID, force, undefined, promotable),
+      drain: (sessionID, force, promotable): Effect.Effect<void, SessionRunner.RunError> =>
+        drain(sessionID, force, undefined, promotable).pipe(
+          Effect.provideService(SessionInterruption.Reason, () => coordinator.interruption(sessionID)),
+        ),
       // One terminal observation per busy period, covering every coalesced drain.
       settled: (sessionID, exit, reason) =>
         reportLifecycle(

@@ -18,6 +18,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionInbox } from "@opencode/core/session/inbox"
+import { SessionInterruption } from "@opencode/core/session/interruption"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
@@ -139,6 +140,31 @@ describe("SessionExecution lifecycle", () => {
       expect(yield* execution.interrupt(sessionID)).toBeTrue()
       yield* execution.awaitIdle(sessionID)
       expect((yield* claims(database))[sessionID]).toBe(false)
+    }),
+  )
+
+  it.effect("tells the drain once the user stopped it", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const sessionID = Session.ID.make("ses_interruption_user")
+      yield* seedSessions(database, [sessionID])
+      const draining = yield* Deferred.make<() => string | undefined>()
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const context = yield* buildExecution(scope, () =>
+        SessionInterruption.Reason.pipe(
+          Effect.flatMap((reason) => Deferred.succeed(draining, reason)),
+          Effect.andThen(Effect.never),
+        ),
+      )
+      const execution = Context.get(context, SessionExecution.Service)
+      yield* execution.resume(sessionID).pipe(Effect.forkScoped)
+      const reason = yield* Deferred.await(draining)
+      // Teardown interrupts without a reason, so only a user's stop reads as one.
+      expect(reason()).toBeUndefined()
+      yield* execution.interrupt(sessionID)
+      expect(reason()).toBe("user")
+      yield* execution.awaitIdle(sessionID)
     }),
   )
 

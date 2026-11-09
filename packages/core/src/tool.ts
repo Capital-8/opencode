@@ -12,6 +12,7 @@ import { CodeModeCatalog } from "./codemode/catalog.js"
 import { CodeModeTool } from "./codemode/tool.js"
 import { Flag } from "./flag.js"
 import { Image } from "./image.js"
+import { ToolInterrupted } from "./tool/interrupted.js"
 import { Permission } from "./permission.js"
 import { PluginHooks } from "./plugin/hooks.js"
 import { SessionMessage } from "./session/message.js"
@@ -275,7 +276,9 @@ const layer = Layer.effect(
           const codeModeTool = codeModeEnabled
             ? CodeModeTool.create(
                 codeModeInventory,
-                (name, tool, input, context) => run(tool, name, input, context),
+                // A child call cannot settle the outer CodeMode call with its own failure.
+                (name, tool, input, context) =>
+                  run(tool, name, input, context).pipe(Effect.provideService(ToolInterrupted.Slot, undefined)),
                 permission,
                 flag,
               )
