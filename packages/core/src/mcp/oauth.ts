@@ -4,23 +4,24 @@ import {
   auth,
   LATEST_PROTOCOL_VERSION,
   checkResourceAllowed,
+  discoverAuthorizationServerMetadata,
   discoverOAuthServerInfo,
   extractWWWAuthenticateParams,
+  OAuthError,
+  OAuthErrorCode,
   parseErrorResponse,
+  refreshAuthorization,
   resourceUrlFromServerUrl,
   UnauthorizedError,
+  type AuthProvider,
   type FetchLike,
   type OAuthClientProvider,
   type OAuthDiscoveryState,
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
 } from "@modelcontextprotocol/client"
-import {
-  OAuthMetadataSchema,
-  OAuthTokensSchema,
-  OpenIdProviderDiscoveryMetadataSchema,
-} from "@modelcontextprotocol/core"
-import { Cause, Data, Deferred, Effect, Option, Schema } from "effect"
+import { OAuthMetadataSchema, OpenIdProviderDiscoveryMetadataSchema } from "@modelcontextprotocol/core"
+import { Cause, Clock, Data, Deferred, Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
 import type { ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
@@ -33,71 +34,22 @@ import { ErrorSummary } from "../util/error-summary.js"
 /** Client ID Metadata Document: servers that support CIMD accept this URL as the client_id without registration. */
 export const CLIENT_METADATA_URL = "https://opencode.ai/oauth/opencode/client.json"
 
-// Refresh tokens rotate, so concurrent refreshes of the same token share one request or the second gets invalid_grant.
-const refreshes = new Map<string, ReturnType<FetchLike>>()
+// The authorization server refused the refresh token or the client: only a new login helps.
+class RefreshRejected extends Data.TaggedError("McpOAuth.RefreshRejected")<{ readonly message: string }> {}
 
-/** Sends one refresh request whose body carries `token`, in place of the in-process share. */
-type Refresh = (send: FetchLike, url: string | URL, init: RequestInit, token: string) => ReturnType<FetchLike>
+const rejections = new Set<string>([
+  OAuthErrorCode.InvalidGrant,
+  OAuthErrorCode.InvalidClient,
+  OAuthErrorCode.UnauthorizedClient,
+])
 
-// Providers backed by a stored credential refresh under its cross-process lock; see connectProvider.
-const lockedRefreshes = new WeakMap<OAuthClientProvider, Refresh>()
-
-const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
-
-class RefreshRejected extends Data.TaggedError("McpOAuth.RefreshRejected")<{
-  readonly status: number
-  readonly headers: Headers
-  readonly body: string
-}> {}
-
-// The SDK takes a refresh failure it cannot classify (network error, timeout, 5xx) as a lost login and
-// starts a new authorization, which a connection reports as needs_auth until the user signs in again.
-// temporarily_unavailable is an OAuth error the SDK surfaces as is, so the attempt fails and the
-// credential stays for the next one.
-const unavailable = (reason: string) =>
-  Response.json(
-    { error: "temporarily_unavailable", error_description: `Could not refresh the OAuth token: ${reason}` },
-    { status: 503 },
-  )
-
-const refreshKey = (url: string | URL, init: RequestInit | undefined) => {
-  if (!(init?.body instanceof URLSearchParams) || init.body.get("grant_type") !== "refresh_token") return undefined
-  return [String(url), init.body.get("client_id") ?? "", init.body.get("refresh_token") ?? ""].join("\u0000")
-}
-
-// Bun's and Node's fetch types both apply here and the SDK's FetchLike wants Bun's Response, so the
-// overload is picked by annotation and clone() is pinned to the type it was called on. A tool call
-// can stay silent for minutes, so Bun's idle deadline is off; the MCP execution timeout still applies.
-const share = (pending: ReturnType<FetchLike>) => pending.then((response) => response.clone() as typeof response)
-
-// Requests use `FetchHttpClient.Fetch`, which an embedder can replace, rather than the global fetch.
-const sender = Effect.fnUntraced(function* (refresh?: Refresh) {
-  const fetch = yield* FetchHttpClient.Fetch
-  const base: FetchLike = (url, init) => fetch(url, { ...init, timeout: false } as BunFetchRequestInit)
-  const send: FetchLike = (url, init) => {
-    const key = refreshKey(url, init)
-    if (key === undefined) return base(url, init)
-    if (refresh && init?.body instanceof URLSearchParams)
-      return refresh(base, url, init, init.body.get("refresh_token") ?? "")
-    const current = refreshes.get(key)
-    if (current) return share(current)
-    const pending = base(url, init).finally(() => {
-      if (refreshes.get(key) === pending) refreshes.delete(key)
-    })
-    refreshes.set(key, pending)
-    return share(pending)
-  }
-  return send
-})
-
-/** Pass the connection's provider so a stored credential's refresh runs under the credential lock. */
-export const loggedFetch = (
-  fields: { readonly server: string; readonly directory?: string },
-  provider?: OAuthClientProvider,
-) =>
+export const loggedFetch = (fields: { readonly server: string; readonly directory?: string }) =>
   Effect.gen(function* () {
     const run = Effect.runPromiseWith(yield* Effect.context())
-    const send = yield* sender(provider && lockedRefreshes.get(provider))
+    const fetch = yield* FetchHttpClient.Fetch
+    // Bun's idle deadline is off because a tool call can stay silent for minutes; the MCP execution timeout still
+    // applies. Requests use `FetchHttpClient.Fetch`, which an embedder can replace, rather than the global fetch.
+    const send: FetchLike = (url, init) => fetch(url, { ...init, timeout: false } as BunFetchRequestInit)
     const request: FetchLike = (url, init) => {
       const grant = init?.body instanceof URLSearchParams ? init.body.get("grant_type") : undefined
       const operation = grant === "refresh_token" ? "refresh" : grant === "authorization_code" ? "exchange" : undefined
@@ -185,7 +137,6 @@ interface Options {
   }
   readonly clientMetadataUrl?: string
   readonly discovery?: OAuthDiscoveryState
-  readonly invalidate?: OAuthClientProvider["invalidateCredentials"]
 }
 
 const provider = (options: Options): OAuthClientProvider => {
@@ -195,8 +146,6 @@ const provider = (options: Options): OAuthClientProvider => {
   // A missing redirectUrl selects the client-credentials grant in the SDK, so connect still names one.
   const redirectUrl = redirect?.url ?? oauth?.redirect_uri ?? "http://127.0.0.1/callback"
   const refuse = (what: string) => new UnauthorizedError(`MCP server "${options.config.url}" requires ${what}`)
-  const identity = new URL(options.config.url)
-  identity.hash = ""
   let discovery: OAuthDiscoveryState | undefined = options.discovery
   return {
     redirectUrl,
@@ -207,19 +156,7 @@ const provider = (options: Options): OAuthClientProvider => {
     saveDiscoveryState: (state) => {
       discovery = state
     },
-    // The SDK sends no RFC 8707 resource when the server publishes no resource metadata; some
-    // authorization servers require one, so fall back to the configured URL.
-    validateResourceURL: async (_serverUrl, resource) => {
-      if (!resource) return identity
-      if (!checkResourceAllowed({ requestedResource: identity, configuredResource: resource }))
-        throw new Error(`Protected resource ${resource} does not cover ${identity}`)
-      const canonical = new URL(resource)
-      // The transport dials the configured URL with extra query parameters and some servers echo
-      // that back as the resource. Query is transport detail, not identity: the token stays bound
-      // to the configured URL so a later refresh names the same resource the login did.
-      if (canonical.origin === identity.origin && canonical.pathname === identity.pathname) return identity
-      return canonical
-    },
+    validateResourceURL: async (_serverUrl, resource) => selectResource(options.config, resource),
     ...(options.clientMetadataUrl ? { clientMetadataUrl: options.clientMetadataUrl } : {}),
     ...(redirect ? { state: () => redirect.state } : {}),
     clientMetadata: {
@@ -249,7 +186,6 @@ const provider = (options: Options): OAuthClientProvider => {
         )
       return redirect.open(url)
     },
-    ...(options.invalidate ? { invalidateCredentials: options.invalidate } : {}),
     saveCodeVerifier: (verifier) => options.store.saveCodeVerifier(verifier),
     codeVerifier: async () => {
       const verifier = await options.store.codeVerifier()
@@ -257,6 +193,22 @@ const provider = (options: Options): OAuthClientProvider => {
       return verifier
     },
   }
+}
+
+// The SDK sends no RFC 8707 resource when the server publishes no resource metadata; some
+// authorization servers require one, so fall back to the configured URL.
+const selectResource = (config: typeof ConfigMCP.Remote.Type, resource: string | undefined) => {
+  const identity = new URL(config.url)
+  identity.hash = ""
+  if (!resource) return identity
+  if (!checkResourceAllowed({ requestedResource: identity, configuredResource: resource }))
+    throw new Error(`Protected resource ${resource} does not cover ${identity}`)
+  const canonical = new URL(resource)
+  // The transport dials the configured URL with extra query parameters and some servers echo
+  // that back as the resource. Query is transport detail, not identity: the token stays bound
+  // to the configured URL so a later refresh names the same resource the login did.
+  if (canonical.origin === identity.origin && canonical.pathname === identity.pathname) return identity
+  return canonical
 }
 
 const memoryStore = (): Store => {
@@ -287,154 +239,169 @@ const toCredential = (input: {
   readonly serverUrl: string
   readonly tokens: StoredOAuthTokens
   readonly client: StoredOAuthClientInformation | undefined
+  readonly resource: string | undefined
 }) =>
   Credential.OAuth.make({
     type: "oauth",
     methodID: input.methodID,
     access: input.tokens.access_token,
     refresh: input.tokens.refresh_token ?? "",
-    // 0 is non-expiring; toTokens then omits expires_in so the SDK does not force a refresh.
+    // 0 means the server gave no lifetime, so the token is only refreshed after a 401.
     expires: input.tokens.expires_in ? Date.now() + input.tokens.expires_in * 1000 : 0,
     metadata: {
       serverUrl: input.serverUrl,
       tokenType: input.tokens.token_type,
       ...(input.tokens.scope ? { scope: input.tokens.scope } : {}),
       ...(input.tokens.issuer ? { issuer: input.tokens.issuer } : {}),
+      ...(input.resource ? { resource: input.resource } : {}),
       ...(input.client ? { client: input.client } : {}),
     },
   })
 
-const toTokens = (credential: Credential.OAuth): StoredOAuthTokens => {
-  const metadata = credential.metadata ?? {}
-  return {
-    access_token: credential.access,
-    token_type: typeof metadata.tokenType === "string" ? metadata.tokenType : "Bearer",
-    ...(credential.refresh ? { refresh_token: credential.refresh } : {}),
-    ...(credential.expires ? { expires_in: Math.max(0, Math.floor((credential.expires - Date.now()) / 1000)) } : {}),
-    ...(typeof metadata.scope === "string" ? { scope: metadata.scope } : {}),
-    ...(typeof metadata.issuer === "string" ? { issuer: metadata.issuer } : {}),
-  }
-}
-
 /**
- * A provider for one credential the caller already selected, or none. It never looks up the active credential
- * itself: it reads and refreshes only the selected row, and a provider made without one stays anonymous.
+ * Bearer tokens for one credential the caller already selected, or none. It never looks up the active credential
+ * itself: it reads and refreshes only the selected row, and one made without a credential stays anonymous. A
+ * connection never starts a login, so a token the server refuses and cannot be refreshed ends in needs_auth.
  */
 export const connectProvider = Effect.fnUntraced(function* (input: {
+  readonly server: string
   readonly config: typeof ConfigMCP.Remote.Type
   readonly credential: Credential.Info | undefined
-}) {
-  const credentials = yield* Credential.Service
-  const run = Effect.runPromiseWith(yield* Effect.context())
-  const fetch = yield* sender()
+}): Effect.fn.Return<AuthProvider, never, Credential.Service> {
   const found = input.credential
-  if (!found || found.value.type !== "oauth") return provider({ config: input.config, store: memoryStore(), fetch })
+  // Without onUnauthorized the transport answers a 401 with UnauthorizedError.
+  if (found?.value.type !== "oauth") return { token: async () => undefined }
   const id = found.id
-  const methodID = found.value.methodID
-  const read = async () => {
-    const stored = await run(credentials.get(id))
-    return stored?.value.type === "oauth" ? stored.value : undefined
-  }
-  // Refresh tokens rotate and the row is shared across connections: only drop it while it still holds ours.
-  let presented = found.value.refresh
-  // Every process and Location sharing the database refreshes this row one at a time. A caller holding a
-  // refresh token the row no longer has gets the stored tokens instead of spending it: servers that rotate
-  // refresh tokens revoke the grant on reuse.
-  const refresh: Refresh = (send, url, init, token) =>
-    run(
-      credentials
-        .refresh(id, {
-          stale: (current) => current.refresh === token,
-          refresh: (current) =>
-            Effect.gen(function* () {
-              // The body is read here so the refresh time limit also covers a server that stalls after its headers.
-              const { response, body } = yield* Effect.tryPromise({
-                try: async (signal) => {
-                  const response = await send(url, { ...init, signal })
-                  return { response, body: await response.text() }
-                },
-                catch: (error) => error,
-              })
-              const parsed = OAuthTokensSchema.safeParse(
-                response.ok ? Option.getOrUndefined(decodeJson(body)) : undefined,
-              )
-              if (!parsed.success)
-                return yield* new RefreshRejected({ status: response.status, headers: response.headers, body })
-              // The SDK ignores an issuer in the token response; keep the one this credential was stamped with.
-              const issuer = current.metadata?.issuer
-              return toCredential({
-                methodID,
-                serverUrl: input.config.url,
-                tokens: {
-                  refresh_token: token,
-                  ...parsed.data,
-                  issuer: typeof issuer === "string" ? issuer : undefined,
-                },
-                client: clientFromCredential(current),
-              })
-            }),
-        })
-        .pipe(
-          Effect.map((value) =>
-            value
-              ? Response.json(toTokens(value))
-              : // The credential was signed out meanwhile; the SDK drops it and reports needs_auth.
-                Response.json({ error: "invalid_grant" }, { status: 400 }),
+  const credentials = yield* Credential.Service
+  const fetchFn = yield* loggedFetch({ server: input.server })
+  const run = Effect.runPromiseWith(yield* Effect.context())
+  const read = credentials.get(id).pipe(Effect.map((row) => (row?.value.type === "oauth" ? row.value : undefined)))
+  const refresh = (stale: (current: Credential.OAuth, now: number) => boolean, resourceMetadataUrl?: URL) =>
+    credentials.refresh(id, {
+      stale,
+      refresh: (current) =>
+        exchange({ config: input.config, fetchFn, current, resourceMetadataUrl }).pipe(
+          Effect.tapError((error) =>
+            error instanceof RefreshRejected
+              ? Effect.logWarning("mcp oauth credential invalidated", { credentialID: id, reason: error.message }).pipe(
+                  Effect.andThen(credentials.remove(id)),
+                )
+              : Effect.void,
           ),
-          Effect.catch((error) => {
-            if (!(error instanceof RefreshRejected))
-              return Effect.succeed(unavailable(error instanceof Error ? error.message : String(error)))
-            if (error.status === 429 || error.status >= 500) return Effect.succeed(unavailable(`HTTP ${error.status}`))
-            return Effect.succeed(new Response(error.body, { status: error.status, headers: error.headers }))
-          }),
         ),
-    )
-  const result = provider({
-    config: input.config,
-    fetch,
-    invalidate: async (scope) => {
-      if (scope === "verifier" || scope === "discovery") return
-      const oauth = await read()
-      if (!oauth || oauth.refresh !== presented) return
-      await run(Effect.logWarning("mcp oauth credential invalidated", { credentialID: id, scope }))
-      await run(credentials.remove(id))
-    },
-    store: {
-      tokens: async () => {
-        const oauth = await read()
-        if (!oauth) return undefined
-        presented = oauth.refresh
-        return toTokens(oauth)
-      },
-      saveTokens: async (tokens) => {
-        const previous = await read()
-        // Another connection rotated past the token this one presented; its tokens win.
-        if (previous && previous.refresh !== presented && previous.refresh !== (tokens.refresh_token ?? "")) return
-        const value = toCredential({
-          methodID,
-          serverUrl: input.config.url,
-          tokens,
-          client: previous ? clientFromCredential(previous) : undefined,
-        })
-        presented = value.refresh
-        await run(credentials.update(id, { value }))
-      },
-      clientInformation: async () => {
-        const oauth = await read()
-        return oauth ? clientFromCredential(oauth) : undefined
-      },
-      saveClientInformation: async (client) => {
-        const oauth = await read()
-        if (!oauth) return
-        await run(credentials.update(id, { value: { ...oauth, metadata: { ...oauth.metadata, client } } }))
-      },
-      codeVerifier: async () => undefined,
-      saveCodeVerifier: async () => {},
-    },
-  })
-  lockedRefreshes.set(result, refresh)
-  return result
+    })
+  const refused = () => new UnauthorizedError(`MCP server "${input.config.url}" requires user authorization`)
+  // The token last sent. A 401 refreshes only while the row still holds it: another connection or process may
+  // have refreshed it already.
+  let presented: string | undefined
+  return {
+    // A token that expires soon is refreshed first. If that fails, the current token goes out and a 401 decides.
+    token: () =>
+      run(
+        Effect.gen(function* () {
+          const current = yield* read
+          const expiring = current?.refresh && Credential.expiring(current, yield* Clock.currentTimeMillis)
+          const value = expiring
+            ? yield* refresh(Credential.expiring).pipe(Effect.orElseSucceed(() => current))
+            : current
+          presented = value?.access
+          return presented
+        }),
+      ),
+    onUnauthorized: (context) =>
+      run(
+        Effect.gen(function* () {
+          const rejected = presented
+          if (!(yield* read)?.refresh) return yield* Effect.fail(refused())
+          const value = yield* refresh(
+            (current) => current.access === rejected,
+            extractWWWAuthenticateParams(context.response).resourceMetadataUrl,
+          ).pipe(
+            Effect.catch((error) =>
+              error instanceof RefreshRejected
+                ? Effect.fail(refused())
+                : // Not a lost login: keep the credential and fail this attempt so the next one tries again.
+                  Effect.fail(
+                    new OAuthError(
+                      OAuthErrorCode.TemporarilyUnavailable,
+                      `Could not refresh the OAuth token: ${error instanceof Error ? error.message : String(error)}`,
+                    ),
+                  ),
+            ),
+          )
+          if (!value) return yield* Effect.fail(refused())
+        }),
+      ),
+  }
 })
+
+// Refreshes against the authorization server that issued the credential, for the resource the login named.
+// Rows saved before those were stored discover both from the MCP server, as the login did.
+const exchange = (input: {
+  readonly config: typeof ConfigMCP.Remote.Type
+  readonly fetchFn: FetchLike
+  readonly current: Credential.OAuth
+  readonly resourceMetadataUrl: URL | undefined
+}) =>
+  Effect.tryPromise({
+    try: async () => {
+      // An overloaded or failing server says nothing about the login; report the status, not its body.
+      const fetchFn: FetchLike = async (url, init) => {
+        const response = await input.fetchFn(url, init)
+        if (response.status === 429 || response.status >= 500) throw new Error(`HTTP ${response.status}`)
+        return response
+      }
+      const metadata = input.current.metadata ?? {}
+      const oauth = input.config.oauth || undefined
+      const client = oauth?.client_id
+        ? { client_id: oauth.client_id, client_secret: oauth.client_secret }
+        : clientFromCredential(input.current)
+      if (!client) throw new RefreshRejected({ message: "no OAuth client information" })
+      const issuer = typeof metadata.issuer === "string" ? metadata.issuer : undefined
+      const server =
+        (await configuredDiscovery({ config: input.config, fetchFn })) ??
+        (issuer
+          ? {
+              authorizationServerUrl: issuer,
+              authorizationServerMetadata: await discoverAuthorizationServerMetadata(issuer, {
+                fetchFn,
+              }),
+              resourceMetadata: undefined,
+            }
+          : await discoverOAuthServerInfo(input.config.url, {
+              resourceMetadataUrl: input.resourceMetadataUrl,
+              fetchFn,
+            }))
+      const resource =
+        typeof metadata.resource === "string"
+          ? metadata.resource
+          : selectResource(input.config, server.resourceMetadata?.resource).toString()
+      const tokens = await refreshAuthorization(server.authorizationServerUrl, {
+        metadata: server.authorizationServerMetadata,
+        clientInformation: client,
+        refreshToken: input.current.refresh,
+        resource,
+        fetchFn,
+      })
+      return toCredential({
+        methodID: input.current.methodID,
+        serverUrl: input.config.url,
+        tokens: {
+          refresh_token: input.current.refresh,
+          ...tokens,
+          issuer: server.authorizationServerMetadata?.issuer ?? issuer ?? server.authorizationServerUrl,
+        },
+        client: clientFromCredential(input.current),
+        resource,
+      })
+    },
+    catch: (error) =>
+      error instanceof RefreshRejected
+        ? error
+        : error instanceof OAuthError && rejections.has(error.code)
+          ? new RefreshRejected({ message: error.message })
+          : error,
+  })
 
 export const authorize = (input: {
   readonly name: string
@@ -579,7 +546,14 @@ export const authorize = (input: {
         hasRefreshToken: Boolean(tokens.refresh_token),
         expiresIn: tokens.expires_in,
       })
-      return toCredential({ methodID: input.methodID, serverUrl: input.config.url, tokens, client })
+      return toCredential({
+        methodID: input.methodID,
+        serverUrl: input.config.url,
+        tokens,
+        client,
+        // Stored so a refresh names the same resource without discovering it again.
+        resource: selectResource(input.config, discovery.resourceMetadata?.resource).toString(),
+      })
     })
 
     yield* Effect.tryPromise({
