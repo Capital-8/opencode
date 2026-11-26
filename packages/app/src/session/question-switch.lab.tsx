@@ -8,7 +8,7 @@ export default {
   component: SessionPreview,
   parameters: {
     layout: "fullscreen",
-    // The components lab shows these Knobs and their replay buttons in its inspector.
+    // The Lab shows these Knobs and their replay buttons in its inspector.
     motion: ["Question"],
     docs: {
       description: {
